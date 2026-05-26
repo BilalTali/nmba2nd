@@ -28,6 +28,12 @@
  *   nmbaagent/         <-- Laravel app is SIBLING of public_html, NOT child
  */
 
+// Increase maximum execution time to 240 seconds to prevent early timeout
+@set_time_limit(240);
+
+// Prevent the webserver from killing the script when the loopback curl disconnects
+ignore_user_abort(true);
+
 // ── Load CRON_TOKEN securely from the Laravel .env file ─────────
 $possibleRoots = [
     dirname(__DIR__) . '/nmbaagent', // Shared hosting sibling
@@ -102,7 +108,13 @@ if (file_exists($lockFile)) {
     }
 }
 touch($lockFile);
-register_shutdown_function(function() use ($lockFile) { @unlink($lockFile); });
+
+$lockReleased = false;
+register_shutdown_function(function() use ($lockFile, &$lockReleased) {
+    if (!$lockReleased) {
+        @unlink($lockFile);
+    }
+});
 
 try {
     // ── Bootstrap Laravel Internally ─────────────────────────────────
@@ -128,9 +140,21 @@ try {
         die('[' . date('Y-m-d H:i:s') . '] Circuit breaker active. Queue worker execution deferred.' . PHP_EOL);
     }
 
+    // First, run Laravel schedule:run internally to process scheduled tasks and dispatch batch jobs
+    $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
+    $scheduleInput = new \Symfony\Component\Console\Input\StringInput('schedule:run');
+    $kernel->handle($scheduleInput, $scheduleOutput);
+    $scheduleText = $scheduleOutput->fetch();
+
+    if (!empty(trim($scheduleText))) {
+        $logEntry = '[' . date('Y-m-d H:i:s') . '] Scheduler Output:' . PHP_EOL . $scheduleText . PHP_EOL;
+        file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
+    }
+
     // Capture output of the Artisan command run
     $output = new \Symfony\Component\Console\Output\BufferedOutput();
-    $input = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-jobs=20 --tries=10 --timeout=110 --stop-when-empty');
+    // Process as many jobs as possible for 50 seconds, then exit cleanly to allow loopback
+    $input = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=50 --tries=10 --timeout=110 --stop-when-empty');
 
     // Run the queue worker command internally in the current PHP process SAPI context
     $exitCode = $kernel->handle($input, $output);
@@ -140,8 +164,9 @@ try {
     $logEntry = '[' . date('Y-m-d H:i:s') . '] Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL;
     file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
 
-    // Release lock
-    // @unlink($lockFile); // Handled by shutdown function
+    // Release lock before checking for remaining jobs and loopbacking
+    $lockReleased = true;
+    @unlink($lockFile);
 
     // Check if there are still ready jobs in the queue
     try {
@@ -151,10 +176,12 @@ try {
             ->where('available_at', '<=', time())
             ->count();
 
-        if ($remainingJobs > 0 && \Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') !== true) {
+        $host = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
+        $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
+
+        if ($remainingJobs > 0 && !$isLocalhost && \Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') !== true) {
             // Trigger next batch asynchronously via loopback call
             $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-            $host = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
             $selfUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken);
 
             $logEntry = '[' . date('Y-m-d H:i:s') . "] Spawning next batch async loopback: {$remainingJobs} jobs remaining.\n";

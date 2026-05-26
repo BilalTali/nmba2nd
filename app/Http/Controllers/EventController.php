@@ -63,68 +63,83 @@ class EventController extends Controller
         if (!Cache::has('sre_dashboard_cron_watchdog') && !Cache::get('sre_circuit_breaker_portal_down', false) && ($metrics['pending'] > 0)) {
             Cache::put('sre_dashboard_cron_watchdog', true, 10); // Throttle to max 1 trigger per 10 seconds
             try {
-                $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                $host = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
-                $cronUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode(env('CRON_TOKEN', ''));
-                
-                $ch = curl_init();
-                curl_setopt($ch, CURLOPT_URL, $cronUrl);
-                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                curl_setopt($ch, CURLOPT_TIMEOUT, 1);
-                curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-                curl_exec($ch);
-                curl_close($ch);
+                $host = $_SERVER['HTTP_HOST'] ?? '';
+                $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
+
+                if (!$isLocalhost) {
+                    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                    $cronUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode(env('CRON_TOKEN', ''));
+                    
+                    $ch = curl_init();
+                    curl_setopt($ch, CURLOPT_URL, $cronUrl);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+                    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                    curl_exec($ch);
+                    curl_close($ch);
+                }
             } catch (\Throwable $e) {
                 // Ignore silent watchdog errors
             }
         }
 
         // Enqueue any pending events that slipped through — the persistent queue daemon will pick them up.
-        if (!$autoSyncPaused) {
-            $this->ensurePendingEventsAreQueued();
-        }
+        // Disabled: scheduler handles batch queuing in parallel SyncBatchJobs; executing on page load causes execution timeout with large datasets
+        // if (!$autoSyncPaused) {
+        //     $this->ensurePendingEventsAreQueued();
+        // }
 
-        $recentEvents   = Event::orderBy('created_at', 'desc')->limit(20)->get();
-        $recentFailures = Event::whereNotNull('last_error_log')->orderBy('last_attempt_at', 'desc')->limit(10)->get();
-
-        // Chart Data: Status Pie Chart
-        $statusData = array_values(array_filter([
-            ['name' => 'Synced', 'value' => (int) $counts->get('synced', 0), 'fill' => '#10b981'],
-            ['name' => 'Pending', 'value' => (int) $counts->get('pending', 0), 'fill' => '#f59e0b'],
-            ['name' => 'Failed', 'value' => (int) $counts->get('failed_permanently', 0), 'fill' => '#f43f5e'],
-            ['name' => 'Syncing', 'value' => (int) $counts->get('syncing', 0), 'fill' => '#3b82f6'],
-        ], fn($item) => $item['value'] > 0));
-
-        // Chart Data: Events by Block Bar Chart
-        $blocks = $this->getBlocks();
-        $eventsByBlock = Event::selectRaw('block_id, COUNT(*) as count')
-            ->groupBy('block_id')
-            ->get()->map(function($item) use ($blocks) {
-                return [
-                    'name' => $blocks[$item->block_id] ?? 'Unknown',
-                    'count' => $item->count
-                ];
-            })->sortByDesc('count')->values();
-
-        // Chart Data: Events over last 30 days Area Chart
-        $eventsOverTimeRaw = Event::where('created_at', '>=', now()->subDays(30)->startOfDay())
-            ->selectRaw('DATE(created_at) as date, COUNT(*) as count')
-            ->groupBy('date')
-            ->pluck('count', 'date');
-
-        $eventsOverTime = collect();
-        for ($i = 30; $i >= 0; $i--) {
-            $carbonDate = now()->subDays($i);
-            $dateStr = $carbonDate->format('Y-m-d');
-            $displayDate = $carbonDate->format('M d');
+        $cachedHeavyQueries = Cache::remember('dashboard_heavy_queries', 30, function () use ($counts) {
+            $recentEvents = Event::orderBy('created_at', 'desc')->limit(20)->get();
+            $recentFailures = Event::whereNotNull('last_error_log')->orderBy('last_attempt_at', 'desc')->limit(10)->get();
             
-            $eventsOverTime->push([
-                'date' => $displayDate,
-                'count' => $eventsOverTimeRaw->get($dateStr, 0)
-            ]);
-        }
+            // Chart Data: Status Pie Chart
+            $statusData = array_values(array_filter([
+                ['name' => 'Synced', 'value' => (int) $counts->get('synced', 0), 'fill' => '#10b981'],
+                ['name' => 'Pending', 'value' => (int) $counts->get('pending', 0), 'fill' => '#f59e0b'],
+                ['name' => 'Failed', 'value' => (int) $counts->get('failed_permanently', 0), 'fill' => '#f43f5e'],
+                ['name' => 'Syncing', 'value' => (int) $counts->get('syncing', 0), 'fill' => '#3b82f6'],
+            ], fn($item) => $item['value'] > 0));
+
+            // Chart Data: Events by Block Bar Chart
+            $blocks = $this->getBlocks();
+            $eventsByBlock = Event::selectRaw('block_id, COUNT(*) as count')
+                ->groupBy('block_id')
+                ->get()->map(function($item) use ($blocks) {
+                    return [
+                        'name' => $blocks[$item->block_id] ?? 'Unknown',
+                        'count' => $item->count
+                    ];
+                })->sortByDesc('count')->values();
+
+            // Chart Data: Events over last 30 days Area Chart
+            $eventsOverTimeRaw = Event::where('created_at', '>=', now()->subDays(30)->startOfDay())
+                ->selectRaw('DATE(created_at) as date, COUNT(*) as count')
+                ->groupBy('date')
+                ->pluck('count', 'date');
+
+            $eventsOverTime = collect();
+            for ($i = 30; $i >= 0; $i--) {
+                $carbonDate = now()->subDays($i);
+                $dateStr = $carbonDate->format('Y-m-d');
+                $displayDate = $carbonDate->format('M d');
+                
+                $eventsOverTime->push([
+                    'date' => $displayDate,
+                    'count' => $eventsOverTimeRaw->get($dateStr, 0)
+                ]);
+            }
+
+            return [
+                'recentEvents' => $recentEvents,
+                'recentFailures' => $recentFailures,
+                'statusData' => $statusData,
+                'eventsByBlock' => $eventsByBlock,
+                'eventsOverTime' => $eventsOverTime,
+            ];
+        });
 
         $envFile = base_path('.env');
         $envContent = file_exists($envFile) ? file_get_contents($envFile) : '';
@@ -134,13 +149,13 @@ class EventController extends Controller
 
         return \Inertia\Inertia::render('Events/Dashboard', [
             'metrics'        => $metrics,
-            'recentEvents'   => $recentEvents,
-            'recentFailures' => $recentFailures,
+            'recentEvents'   => $cachedHeavyQueries['recentEvents'],
+            'recentFailures' => $cachedHeavyQueries['recentFailures'],
             'autoSyncPaused' => $autoSyncPaused,
             'portalCredentialsInvalid' => $portalCredentialsInvalid,
-            'statusData'     => $statusData,
-            'eventsByBlock'  => $eventsByBlock,
-            'eventsOverTime' => $eventsOverTime,
+            'statusData'     => $cachedHeavyQueries['statusData'],
+            'eventsByBlock'  => $cachedHeavyQueries['eventsByBlock'],
+            'eventsOverTime' => $cachedHeavyQueries['eventsOverTime'],
             'telemetryData'  => $this->getTelemetryHistory(),
             'portalConfig'   => [
                 'portal_url' => trim($urlMatch[1] ?? config('services.portal.url', '')),
@@ -680,7 +695,8 @@ class EventController extends Controller
             }
 
             // Ensure all pending events have corresponding jobs in the queue.
-            $this->ensurePendingEventsAreQueued();
+            // Disabled: scheduler handles batch queuing in parallel SyncBatchJobs; executing on every health check poll causes execution timeout with large datasets
+            // $this->ensurePendingEventsAreQueued();
 
             $pendingActiveCount = Event::where('sync_status', 'pending')
                 ->where('sync_attempts', '!=', -1)
@@ -791,29 +807,7 @@ class EventController extends Controller
      */
     private function ensurePendingEventsAreQueued(): void
     {
-        // If queue default is 'sync', doing this on page load/poll is dangerous as it will execute them all synchronously and block the request.
-        if (config('queue.default') === 'sync') {
-            return;
-        }
-
-        // Only fetch pending events that are NOT manually locked/overridden
-        /** @var \App\Models\Event[] $pendingEvents */
-        $pendingEvents = Event::where('sync_status', 'pending')
-            ->where('sync_attempts', '!=', -1)
-            ->get();
-
-        if ($pendingEvents->isEmpty()) {
-            return;
-        }
-
-        // Retrieve currently queued event IDs to avoid duplicate dispatching
-        $queuedIds = $this->getQueuedEventIds();
-
-        foreach ($pendingEvents as $event) {
-            if (!isset($queuedIds[$event->id])) {
-                dispatch(new SyncEventJob($event));
-            }
-        }
+        return; // Disabled: scheduler dispatches slots in parallel SyncBatchJobs; manual forceSync is user-driven.
     }
 
     /**
@@ -851,9 +845,11 @@ class EventController extends Controller
         // Always trigger Web Cron loopback as well (perfect for Hostinger / shared hosting)
         try {
             $cronToken = config('services.cron.token');
-            if ($cronToken) {
+            $host = $_SERVER['HTTP_HOST'] ?? '';
+            $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
+
+            if ($cronToken && !$isLocalhost) {
                 $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                $host = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
                 $cronUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken);
 
                 Log::channel('sync')->info('Triggering background queue worker via loopback: ' . $cronUrl);
@@ -868,7 +864,11 @@ class EventController extends Controller
                 curl_exec($ch);
                 curl_close($ch);
             } else {
-                Log::channel('sync')->warning('CRON_TOKEN not set in config/services.php. Loopback trigger skipped.');
+                if ($isLocalhost) {
+                    Log::channel('sync')->info('Skipping loopback trigger on localhost to prevent single-threaded web server deadlock.');
+                } else {
+                    Log::channel('sync')->warning('CRON_TOKEN not set in config/services.php. Loopback trigger skipped.');
+                }
             }
         } catch (\Throwable $e) {
             Log::channel('sync')->warning('Loopback queue worker trigger failed: ' . $e->getMessage());
@@ -1086,41 +1086,56 @@ class EventController extends Controller
         }
         
         if (file_exists($logPath)) {
-            $content = file_get_contents($logPath);
-            $rawLines = explode("\n", trim($content));
+            // Use a circular buffer to keep only the last 300 lines in memory
+            // This prevents memory exhaustion if the log file grows to 100MB+
+            $lines = new \SplFixedArray(300);
+            $index = 0;
+            $count = 0;
             
-            foreach ($rawLines as $line) {
-                if (empty(trim($line))) continue;
-                
+            $handle = @fopen($logPath, 'r');
+            if ($handle) {
+                while (($line = fgets($handle)) !== false) {
+                    $line = trim($line);
+                    if (empty($line)) continue;
+                    
+                    $lines[$index] = $line;
+                    $index = ($index + 1) % 300;
+                    $count++;
+                }
+                fclose($handle);
+            }
+            
+            $totalToTake = min($count, 300);
+            $startIndex = $count > 300 ? $index : 0;
+            
+            $lastLines = [];
+            for ($i = 0; $i < $totalToTake; $i++) {
+                $lastLines[] = $lines[($startIndex + $i) % 300];
+            }
+            
+            foreach ($lastLines as $line) {
                 // Parse Laravel log format: [YYYY-MM-DD HH:MM:SS] env.LEVEL: Message {"context"}
                 if (preg_match('/^\[(.*?)\] (.*?)\.(.*?): (.*)$/', $line, $matches)) {
-                    // Convert UTC timestamp from log file to IST for display
-                    $utcTime = $matches[1];
-                    try {
-                        $timestamp = \Illuminate\Support\Carbon::createFromFormat('Y-m-d H:i:s', $utcTime, 'UTC')
-                            ->timezone('Asia/Kolkata')
-                            ->format('Y-m-d H:i:s');
-                    } catch (\Exception $e) {
-                        $timestamp = $utcTime;
-                    }
-                    
+                    // Log timestamp is already in app timezone natively, no need to convert from UTC
+                    $timestamp = $matches[1];
                     $level = $matches[3];
                     $rest = $matches[4];
+                    $context = null;
+                    
+                    // Extract JSON context if present at the end
+                    if (preg_match('/^(.*?) (\{.*\})$/', $rest, $jsonMatches)) {
+                        $rest = trim($jsonMatches[1]);
+                        $context = json_decode($jsonMatches[2], true);
+                    }
                     
                     $parsedLogs[] = [
                         'timestamp' => $timestamp,
                         'level' => strtoupper($level),
                         'message' => $rest,
-                        'context' => null,
+                        'context' => $context,
                         'raw' => $line
                     ];
                 }
-                // We skip stack trace lines (no timestamp match) so they don't flood the view
-            }
-            
-            // Now that we have actual log entries, keep only the last 300
-            if (count($parsedLogs) > 300) {
-                $parsedLogs = array_slice($parsedLogs, -300);
             }
         }
 

@@ -41,6 +41,7 @@ class PortalHealthService
         }
 
         $client = new Client([
+            'version'         => 2.0,
             'timeout'         => $this->timeout,
             'connect_timeout' => $this->timeout,
             'allow_redirects' => true,

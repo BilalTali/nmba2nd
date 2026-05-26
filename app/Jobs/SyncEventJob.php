@@ -67,10 +67,10 @@ class SyncEventJob implements ShouldQueue
         try {
             $healthService = app(\App\Services\PortalHealthService::class);
             if (!$healthService->isAlive()) {
-                Log::channel('sync')->info('Deferred Sync: Target portal is offline or circuit breaker is active. Releasing back to queue without updating attempt count.', [
+                Log::channel('sync')->info('Deferred Sync: Target portal is offline or circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.', [
                     'event_id' => $this->event->id,
                 ]);
-                $this->release(300); // retry in 5 minutes (300 seconds)
+                $this->delete();
                 return;
             }
         } catch (Exception $e) {
@@ -141,6 +141,10 @@ class SyncEventJob implements ShouldQueue
                 // Post-sync media management: move files to 'events/synced' folder so they can be deleted later via frontend
                 $newPaths = [];
                 foreach ($storedPaths as $path) {
+                    if (str_contains($path, 'events/synced/')) {
+                        $newPaths[] = $path;
+                        continue;
+                    }
                     if (Storage::disk('public')->exists($path)) {
                         $newPath = str_replace('events/', 'events/synced/', $path);
                         Storage::disk('public')->move($path, $newPath);

@@ -16,9 +16,10 @@ class ImageOptimizationService
 
     /**
      * Maximum dimension (px) for any single axis — prevents oversized canvas storage.
+     * Reduced to 800px to dramatically save disk space and inodes on Hostinger.
      */
-    protected const MAX_WIDTH = 1200;
-    protected const MAX_HEIGHT = 1200;
+    protected const MAX_WIDTH = 800;
+    protected const MAX_HEIGHT = 800;
 
     /**
      * Portal hard size ceiling per file: 5 MB.
@@ -27,8 +28,9 @@ class ImageOptimizationService
 
     /**
      * Compression quality starting baseline (%).
+     * Reduced to 75% for massive storage space savings without noticeable visual loss.
      */
-    protected const QUALITY_START = 90;
+    protected const QUALITY_START = 75;
 
     /**
      * Hard quality floor before aborting compression (%).

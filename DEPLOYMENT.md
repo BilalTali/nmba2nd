@@ -17,13 +17,25 @@ Two cron entries are required for adequate burst throughput. Configure both in H
 > Replace `YOUR_CRON_TOKEN` with the value of `CRON_TOKEN` from your `.env` file.
 > The lockfile guard in `nmba-cron.php` prevents the two entries from overlapping.
 
-### Throughput Math
+### Throughput Math (v2 — Parallel Batch Architecture)
+
+The scheduler dispatches **5 × `SyncBatchJob`** per minute sweep. Each batch job:
+- Opens **1 portal session** (login once)
+- Submits **up to 20 events** on that session
+- Total per sweep: **5 × 20 = 100 events**
 
 | Scenario | Calculation | Capacity |
 |---|---|---|
-| Single cron, --max-jobs=10, 5min cycle | 10 jobs × 12 cycles/hr | ~120 events/hr |
-| Two offset crons, --max-jobs=10 | 10 jobs × 24 cycles/hr | ~240 events/hr burst |
-| Burst of 50 submissions | 50 ÷ 120 = 0.42 hr | ~25 min clearance time |
+| 1 sweep/min, 5 slots × 20 events | 100 events × 60 sweeps/hr | **~6,000 events/hr** (portal-limited) |
+| Portal takes ~5s/event | 5 slots × 20 events × 5s = 500s → burst limited by portal RTT | ~100 events / ~5-10 min |
+| Burst of 500 submissions | 500 ÷ 100 per sweep | ~5 sweeps clearance time |
+| Burst of 100 submissions | 100 ÷ 100 per sweep | **~1 minute clearance time** |
+
+> The actual rate is limited by the government portal's own response time (~5–30 seconds per submission).
+> The 5-slot design maximises utilisation by keeping all 5 connections busy simultaneously.
+
+**Queue Worker Config**: Update `nmba-worker.conf` → `numprocs=5` to match the 5 slots.
+
 
 ---
 

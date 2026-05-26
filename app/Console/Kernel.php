@@ -2,6 +2,7 @@
 
 namespace App\Console;
 
+use App\Jobs\SyncBatchJob;
 use App\Jobs\SyncEventJob;
 use App\Models\Event;
 use App\Services\PortalHealthService;
@@ -92,64 +93,76 @@ class Kernel extends ConsoleKernel
                 }
             }
 
-            // --- Query: Fetch pending + zombie records ---
+            // --- Query: Fetch pending + zombie records (up to 100 = 5 slots × 20 each) ---
             // Uses balanced parenthesized grouping to enforce correct boolean OR precedence.
-            // The outer orWhere closure is the SRE Time-Based Deadlock Breaker that recovers
+            // The outer orWhere clause is the SRE Time-Based Deadlock Breaker that recovers
             // jobs frozen in 'syncing' state for over 10 minutes (worker crash recovery).
-            $events = Event::where(function ($query) {
-                $query->where('sync_status', 'pending')
-                      ->where(function ($q) {
-                          $q->whereNull('last_attempt_at')
-                            ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
-                      });
-            })
-            ->orWhere(function ($query) {
-                $query->where('sync_status', 'syncing')
-                      ->where('updated_at', '<', now()->subMinutes(10));
+            $events = Event::where(function ($q) {
+                $q->where(function ($query) {
+                    $query->where('sync_status', 'pending')
+                          ->where(function ($inner) {
+                              $inner->whereNull('last_attempt_at')
+                                    ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
+                          });
+                })
+                ->orWhere(function ($query) {
+                    $query->where('sync_status', 'syncing')
+                          ->where('updated_at', '<', now()->subMinutes(10));
+                });
             })
             ->whereBetween('sync_attempts', [0, 9])
             ->orderBy('created_at', 'asc')
-            ->limit(20)
+            ->limit(25) // 5 parallel slots × 5 events each
             ->get();
 
             if ($events->isEmpty()) {
                 return;
             }
 
-            Log::channel('sync')->info('Scheduler sweep started.', ['candidate_count' => $events->count()]);
+            // Filter out events that are under a dispatch lock (backoff cooldown).
+            $dispatchable = $events->filter(function ($event) {
+                return !Cache::has("sre_sync_dispatch_lock_{$event->id}");
+            });
 
-            foreach ($events as $event) {
-                $cacheKey = "sre_sync_dispatch_lock_{$event->id}";
-                if (Cache::has($cacheKey)) {
+            if ($dispatchable->isEmpty()) {
+                Log::channel('sync')->info('Scheduler sweep: all candidates are under dispatch locks. Skipping.');
+                return;
+            }
+
+            Log::channel('sync')->info('Scheduler sweep started — dispatching parallel batch jobs.', [
+                'candidate_count' => $dispatchable->count(),
+            ]);
+
+            // Chunk events into up to 5 batches of 5 and dispatch one SyncBatchJob per slot.
+            // Each slot gets an isolated portal session (its own cookie jar + transmission lock).
+            $slotIndex = 0;
+            foreach ($dispatchable->chunk(5) as $batch) {
+                if ($slotIndex >= 5) {
+                    break; // Maximum of 5 concurrent portal sessions
+                }
+
+                $batchIds = $batch->pluck('id')->toArray();
+
+                // Check if this slot already has a batch running (WithoutOverlapping check).
+                // If it does, skip this slot to avoid clobbering the active session.
+                $slotLockKey = "sync_batch_slot_{$slotIndex}";
+                if (Cache::has("laravel_unique_job:{$slotLockKey}")) {
+                    Log::channel('sync')->info("Scheduler: slot {$slotIndex} is busy — skipping.", [
+                        'slot' => $slotIndex,
+                    ]);
+                    $slotIndex++;
                     continue;
                 }
 
-                // Atomic CAS update per record before dispatching — prevents scheduler-level
-                // duplicate dispatching across distributed worker nodes.
-                $updated = Event::where(function ($query) use ($event) {
-                    $query->where('id', $event->id)
-                          ->where('sync_status', 'pending')
-                          ->where(function ($q) {
-                              $q->whereNull('last_attempt_at')
-                                ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
-                          });
-                })
-                ->orWhere(function ($query) use ($event) {
-                    $query->where('id', $event->id)
-                          ->where('sync_status', 'syncing')
-                          ->where('updated_at', '<', now()->subMinutes(10))
-                          ->whereBetween('sync_attempts', [0, 9]); // prevent re-dispatch of locked (-1) or edge records
-                })
-                ->update([
-                    'last_attempt_at' => now(),
-                    'sync_status'     => 'pending',
+                dispatch(new SyncBatchJob($batchIds, $slotIndex));
+
+                Log::channel('sync')->info("Scheduler dispatched SyncBatchJob.", [
+                    'slot'        => $slotIndex,
+                    'event_count' => count($batchIds),
+                    'event_ids'   => $batchIds,
                 ]);
 
-                if ($updated === 1) {
-                    Cache::put($cacheKey, true, 3600);
-                    dispatch(new SyncEventJob($event));
-                    Log::channel('sync')->info('Scheduler dispatched job.', ['event_id' => $event->id]);
-                }
+                $slotIndex++;
             }
 
         })->everyMinute()->name('nmba_sync_orchestration_sweep')->withoutOverlapping();
@@ -160,14 +173,14 @@ class Kernel extends ConsoleKernel
             ->everyFifteenMinutes()
             ->name('nmba_sync_health_check')
             ->withoutOverlapping()
-            ->appendOutputTo(storage_path('logs/sync-health.log'));
+            ->appendOutputTo(storage_path('logs/sync-health-scheduler.log'));
 
         // FIX-SEC-02: Weekly portal credential validation.
         // Tests actual authentication and writes to credential-checks.log.
         $schedule->command('portal:check-credentials', ['--quiet-on-success'])
             ->weekly()
             ->name('nmba_portal_credential_check')
-            ->appendOutputTo(storage_path('logs/credential-checks.log'));
+            ->appendOutputTo(storage_path('logs/credential-checks-scheduler.log'));
     }
 
     /**

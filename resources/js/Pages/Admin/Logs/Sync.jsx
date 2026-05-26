@@ -55,9 +55,18 @@ export default function SyncLogs({ auth, logs }) {
                                                         {log.timestamp ? (
                                                             <div className="flex flex-col">
                                                                 {(() => {
-                                                                    const [datePart, timePart] = log.timestamp.split(' ');
-                                                                    const [y, m, d] = datePart.split('-');
-                                                                    const [H, i, s] = timePart.split(':');
+                                                                    const parts = log.timestamp.split(' ');
+                                                                    if (parts.length !== 2) {
+                                                                        return <span className="font-medium text-gray-700">{log.timestamp}</span>;
+                                                                    }
+                                                                    const [datePart, timePart] = parts;
+                                                                    const dateParts = datePart.split('-');
+                                                                    const timeParts = timePart.split(':');
+                                                                    if (dateParts.length !== 3 || timeParts.length !== 3) {
+                                                                        return <span className="font-medium text-gray-700">{log.timestamp}</span>;
+                                                                    }
+                                                                    const [y, m, d] = dateParts;
+                                                                    const [H, i, s] = timeParts;
                                                                     const HNum = parseInt(H, 10);
                                                                     const ampm = HNum >= 12 ? 'PM' : 'AM';
                                                                     const H12 = HNum % 12 || 12;

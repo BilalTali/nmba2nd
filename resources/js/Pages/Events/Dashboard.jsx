@@ -31,7 +31,7 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
     const [hoveredBucket, setHoveredBucket] = useState(null);
 
     // SRE Uptime calculation
-    const getUptimeTimelineMetrics = () => {
+    const { overallUptime, buckets } = React.useMemo(() => {
         if (!telemetry || telemetry.length === 0) {
             return {
                 overallUptime: 100,
@@ -124,9 +124,7 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
             overallUptime,
             buckets
         };
-    };
-
-    const { overallUptime, buckets } = getUptimeTimelineMetrics();
+    }, [telemetry, uptimeRange]);
 
     useEffect(() => {
         const checkPortalHealth = async () => {
