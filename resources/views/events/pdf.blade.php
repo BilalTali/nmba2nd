@@ -383,6 +383,9 @@
         @if(!empty($filters['venue_search']))
             <div class="filter-tag">Venue Search: <strong>"{{ $filters['venue_search'] }}"</strong></div>
         @endif
+        @if(!empty($filters['sync_status']) && $filters['sync_status'] !== 'All')
+            <div class="filter-tag">Sync Status: <strong>{{ $filters['sync_status'] }}</strong></div>
+        @endif
         <div class="filter-tag">
             Export Access Level: <strong>Administrative (Full Audit Logs)</strong>
         </div>

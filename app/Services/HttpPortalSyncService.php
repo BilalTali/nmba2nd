@@ -58,14 +58,14 @@ class HttpPortalSyncService implements PortalSyncInterface
     protected ?string $submissionToken = null;
 
     /**
-     * @param int $sessionSlot 0–4. Governs which cookie jar cache key and
+     * @param int $sessionSlot 0–7. Governs which cookie jar cache key and
      *                         which transmission lock this instance uses.
      *                         Defaults to 0 for backward compatibility with
      *                         SyncEventJob (single-event legacy path).
      */
     public function __construct(int $sessionSlot = 0)
     {
-        $this->sessionSlot  = max(0, min(4, $sessionSlot)); // clamp to valid range
+        $this->sessionSlot  = max(0, min(7, $sessionSlot)); // clamp to valid range
         $this->baseUrl      = rtrim((string) config('services.portal.url'), '/');
         $this->loginUrl     = $this->baseUrl . '/login';
         $this->submitUrl    = $this->baseUrl . '/event_create';

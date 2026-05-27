@@ -66,7 +66,7 @@ class SyncBatchJob implements ShouldQueue
     ) {
         $this->connection = 'database';
         $this->queue      = 'default';
-        $this->sessionSlot = max(0, min(4, $sessionSlot));
+        $this->sessionSlot = max(0, min(7, $sessionSlot));
     }
 
     /**
@@ -166,9 +166,15 @@ class SyncBatchJob implements ShouldQueue
                 continue;
             }
 
-            // Atomic CAS claim: pending → syncing (prevents double processing)
+            // Atomic CAS claim: pending or stuck syncing → syncing (prevents double processing)
             $claimed = Event::where('id', $eventId)
-                ->where('sync_status', 'pending')
+                ->where(function ($query) {
+                    $query->where('sync_status', 'pending')
+                          ->orWhere(function ($q) {
+                              $q->where('sync_status', 'syncing')
+                                ->where('updated_at', '<', now()->subMinutes(10));
+                          });
+                })
                 ->update([
                     'sync_status'     => 'syncing',
                     'sync_attempts'   => DB::raw('sync_attempts + 1'),

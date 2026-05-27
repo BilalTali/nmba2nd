@@ -827,6 +827,17 @@
                         </select>
                     </div>
 
+                    <!-- Sync Status -->
+                    <div class="fg">
+                        <label>Sync Status</label>
+                        <select name="sync_status">
+                            <option value="All">All Statuses</option>
+                            @foreach(['Synced', 'Pending', 'Rejected/Failed'] as $status)
+                                <option value="{{ $status }}" {{ ($filters['sync_status'] ?? '') === $status ? 'selected' : '' }}>{{ $status }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+
                     <!-- Search Input -->
                     <div class="fg">
                         <label>Venue Search</label>

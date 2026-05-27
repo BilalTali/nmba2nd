@@ -57,8 +57,14 @@ return [
             'prefix_indexes' => true,
             'strict' => true,
             'engine' => null,
+            // Prevent long-running queue workers from holding idle connections forever.
+            // MySQL/MariaDB will drop connections idle for more than 60s.
+            // Laravel will automatically reconnect on the next query.
+            'reconnect' => true,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+                // Server-side: close idle connections after 60 seconds
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET SESSION wait_timeout=60, SESSION interactive_timeout=60",
             ]) : [],
         ],
 

@@ -78,7 +78,7 @@ class EventController extends Controller
                     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
                     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
                     curl_exec($ch);
-                    curl_close($ch);
+                    $ch = null; // curl_close() is deprecated in PHP 8.5+; null-assignment cleans up the handle
                 }
             } catch (\Throwable $e) {
                 // Ignore silent watchdog errors
@@ -272,13 +272,16 @@ class EventController extends Controller
 
         // ── 3. SUBMISSION ID (FIX-ARCH-01) ──────────────────────────────
         // Globally unique per-record identifier — kept separate from semantic_hash.
-        $submissionId = Event::generateSubmissionId(
-            $validated['event_name'],
-            $validated['event_date'],
-            $validated['event_venue'],
-            (int) $validated['actual_attendance'],
-            (int) $validated['block_id'],
-            $coordinatorName
+        // Uses generateSemanticHash() + uniqid suffix to remain unique while using the modern API.
+        $submissionId = md5(
+            Event::generateSemanticHash(
+                $validated['event_name'],
+                $validated['event_date'],
+                $validated['event_venue'],
+                (int) $validated['actual_attendance'],
+                (int) $validated['block_id'],
+                $coordinatorName
+            ) . '|' . uniqid('', true)
         );
 
         $photoPaths = [];
@@ -512,7 +515,7 @@ class EventController extends Controller
             $exitCode = \Illuminate\Support\Facades\Artisan::call('queue:work', [
                 'connection' => 'database',
                 '--queue' => 'default',
-                '--max-jobs' => 10,
+                '--max-jobs' => 25,
                 '--stop-when-empty' => true,
                 '--tries' => 1,
                 '--timeout' => 30
@@ -821,6 +824,16 @@ class EventController extends Controller
             return;
         }
 
+        // On localhost, we rely entirely on persistent queue workers (start_workers.sh)
+        // and we completely disable spawning parallel background processes via exec() or curl
+        // to prevent process starvation and database "Too many connections" errors.
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1') || php_sapi_name() === 'cli';
+
+        if ($isLocalhost) {
+            return;
+        }
+
         // Try local exec() fallback first (for environments where exec is enabled)
         try {
             if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN' && function_exists('exec')) {
@@ -834,7 +847,7 @@ class EventController extends Controller
                 if (!file_exists($phpBinary) || !is_executable($phpBinary)) {
                     $phpBinary = 'php';
                 }
-                $command = escapeshellarg($phpBinary) . ' ' . escapeshellarg($artisanPath) . ' queue:work database --max-jobs=10 --tries=10 --timeout=110';
+                $command = escapeshellarg($phpBinary) . ' ' . escapeshellarg($artisanPath) . ' queue:work database --max-jobs=25 --tries=10 --timeout=110';
                 exec($command . " > /dev/null 2>&1 &");
                 Log::channel('sync')->info('Background queue worker started via exec().');
             }
@@ -862,7 +875,7 @@ class EventController extends Controller
                 curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
                 curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
                 curl_exec($ch);
-                curl_close($ch);
+                $ch = null; // curl_close() is deprecated in PHP 8.5+; null-assignment cleans up the handle
             } else {
                 if ($isLocalhost) {
                     Log::channel('sync')->info('Skipping loopback trigger on localhost to prevent single-threaded web server deadlock.');
@@ -877,22 +890,28 @@ class EventController extends Controller
         // Final Bulletproof Fallback: Internal Artisan Call (Runs after response is sent)
         // Limits to 5 jobs to avoid holding the PHP process for too long in environments 
         // that don't fully release the HTTP connection until PHP exits.
-        register_shutdown_function(function () {
-            try {
-                if (\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') !== true) {
-                    \Illuminate\Support\Facades\Artisan::call('queue:work', [
-                        'connection' => 'database',
-                        '--max-jobs' => 5,
-                        '--stop-when-empty' => true,
-                        '--timeout' => 110,
-                        '--quiet' => true,
-                    ]);
-                    // Only log if jobs were actually processed to avoid log spam, though --quiet handles CLI output
+        // Disabled on localhost to prevent deadlocks in single-threaded web servers (e.g. artisan serve).
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
+
+        if (!$isLocalhost) {
+            register_shutdown_function(function () {
+                try {
+                    if (Cache::get('sre_circuit_breaker_portal_down') !== true) {
+                        \Illuminate\Support\Facades\Artisan::call('queue:work', [
+                            'connection' => 'database',
+                            '--max-jobs' => 5,
+                            '--stop-when-empty' => true,
+                            '--timeout' => 110,
+                            '--quiet' => true,
+                        ]);
+                        // Only log if jobs were actually processed to avoid log spam, though --quiet handles CLI output
+                    }
+                } catch (\Throwable $e) {
+                    // Silently catch so it doesn't crash the shutdown sequence
                 }
-            } catch (\Throwable $e) {
-                // Silently catch so it doesn't crash the shutdown sequence
-            }
-        });
+            });
+        }
     }
 
     /**
@@ -938,6 +957,18 @@ class EventController extends Controller
         if ($request->filled('venue_search')) {
             $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
         }
+        if ($request->filled('sync_status') && $request->sync_status !== 'All') {
+            $statusMap = [
+                'Synced' => 'synced',
+                'Pending' => 'pending',
+                'Rejected/Failed' => 'failed_permanently',
+                'Rejected' => 'failed_permanently',
+            ];
+            $dbStatus = $statusMap[$request->sync_status] ?? null;
+            if ($dbStatus) {
+                $query->where('sync_status', $dbStatus);
+            }
+        }
 
         $events = $query->get();
         $blocks = $this->getBlocks();
@@ -945,7 +976,7 @@ class EventController extends Controller
         return view('events.pdf', [
             'events' => $events,
             'blocks' => $blocks,
-            'filters' => $request->only(['block_id', 'start_date', 'end_date', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search']),
+            'filters' => $request->only(['block_id', 'start_date', 'end_date', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
         ]);
     }
 

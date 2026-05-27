@@ -112,7 +112,7 @@ class Kernel extends ConsoleKernel
             })
             ->whereBetween('sync_attempts', [0, 9])
             ->orderBy('created_at', 'asc')
-            ->limit(25) // 5 parallel slots × 5 events each
+            ->limit(160) // 8 parallel slots × 20 events each
             ->get();
 
             if ($events->isEmpty()) {
@@ -133,20 +133,20 @@ class Kernel extends ConsoleKernel
                 'candidate_count' => $dispatchable->count(),
             ]);
 
-            // Chunk events into up to 5 batches of 5 and dispatch one SyncBatchJob per slot.
+            // Chunk events into up to 5 batches of 20 and dispatch one SyncBatchJob per slot.
             // Each slot gets an isolated portal session (its own cookie jar + transmission lock).
             $slotIndex = 0;
-            foreach ($dispatchable->chunk(5) as $batch) {
-                if ($slotIndex >= 5) {
-                    break; // Maximum of 5 concurrent portal sessions
+            foreach ($dispatchable->chunk(20) as $batch) {
+                if ($slotIndex >= 8) {
+                    break; // Maximum of 8 concurrent portal sessions
                 }
 
                 $batchIds = $batch->pluck('id')->toArray();
 
                 // Check if this slot already has a batch running (WithoutOverlapping check).
                 // If it does, skip this slot to avoid clobbering the active session.
-                $slotLockKey = "sync_batch_slot_{$slotIndex}";
-                if (Cache::has("laravel_unique_job:{$slotLockKey}")) {
+                $slotLockKey = "laravel-queue-overlap:App\Jobs\SyncBatchJob:sync_batch_slot_{$slotIndex}";
+                if (Cache::has($slotLockKey)) {
                     Log::channel('sync')->info("Scheduler: slot {$slotIndex} is busy — skipping.", [
                         'slot' => $slotIndex,
                     ]);

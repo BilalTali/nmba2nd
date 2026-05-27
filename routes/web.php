@@ -88,6 +88,18 @@ Route::middleware(['auth', 'admin'])->group(function () {
         if ($request->filled('venue_search')) {
             $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
         }
+        if ($request->filled('sync_status') && $request->sync_status !== 'All') {
+            $statusMap = [
+                'Synced' => 'synced',
+                'Pending' => 'pending',
+                'Rejected/Failed' => 'failed_permanently',
+                'Rejected' => 'failed_permanently',
+            ];
+            $dbStatus = $statusMap[$request->sync_status] ?? null;
+            if ($dbStatus) {
+                $query->where('sync_status', $dbStatus);
+            }
+        }
 
         // 2. Fetch Live Stats (based on filtered events)
         $totalEvents = (clone $query)->count();
@@ -152,7 +164,7 @@ Route::middleware(['auth', 'admin'])->group(function () {
             'participantsByBlock' => $participantsByBlock,
             'events' => $events,
             'blocks' => $blocks,
-            'filters' => $request->only(['start_date', 'end_date', 'block_id', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search']),
+            'filters' => $request->only(['start_date', 'end_date', 'block_id', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
         ]);
     })->name('admin.events.portal');
 
@@ -188,6 +200,18 @@ Route::middleware(['auth', 'admin'])->group(function () {
         }
         if ($request->filled('venue_search')) {
             $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
+        }
+        if ($request->filled('sync_status') && $request->sync_status !== 'All') {
+            $statusMap = [
+                'Synced' => 'synced',
+                'Pending' => 'pending',
+                'Rejected/Failed' => 'failed_permanently',
+                'Rejected' => 'failed_permanently',
+            ];
+            $dbStatus = $statusMap[$request->sync_status] ?? null;
+            if ($dbStatus) {
+                $query->where('sync_status', $dbStatus);
+            }
         }
 
         $events = $query->orderBy('event_date', 'desc')->orderBy('id', 'desc')->get();
