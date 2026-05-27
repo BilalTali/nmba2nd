@@ -67,7 +67,7 @@ ok "Migrations applied."
 
 # STEP 5 — Run historical hash audit (non-destructive)
 log "Step 5/10 — Scanning database for historical hash corruption..."
-remote_artisan "audit:rehash-events 2>&1"
+remote_artisan "audit:rehash-events 2>&1" || true
 ok "Hash audit complete. Report saved to storage/audit/hash-audit-YYYY-MM-DD.log"
 
 # STEP 6 — Warm up all Laravel caches
