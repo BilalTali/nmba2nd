@@ -974,6 +974,7 @@
                 <table>
                     <thead>
                         <tr>
+                            <th style="width: 50px;">S.No</th>
                             <th>Event Details</th>
                             <th>Event Date</th>
                             <th>Venue & Jurisdiction</th>
@@ -986,6 +987,9 @@
                     <tbody>
                         @forelse($events as $event)
                             <tr>
+                                <td style="font-size: 0.8rem; font-weight: 700; color: var(--muted); text-align: center;">
+                                    {{ ($events->currentPage() - 1) * $events->perPage() + $loop->iteration }}
+                                </td>
                                 <td>
                                     <div class="event-name">{{ $event->event_name }}</div>
                                     <div class="event-id">#{{ $event->id }}</div>

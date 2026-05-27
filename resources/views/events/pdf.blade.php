@@ -395,17 +395,19 @@
     <table>
         <thead>
             <tr>
+                <th style="width: 5%;">S.No</th>
                 <th style="width: 8%;">ID</th>
-                <th style="width: 27%;">Event Details</th>
-                <th style="width: 22%;">Venue & Location</th>
-                <th style="width: 14%;">Date</th>
+                <th style="width: 25%;">Event Details</th>
+                <th style="width: 20%;">Venue & Location</th>
+                <th style="width: 12%;">Date</th>
                 <th style="width: 11%;">Headcount</th>
-                <th style="width: 18%;">Coordinator</th>
+                <th style="width: 19%;">Coordinator</th>
             </tr>
         </thead>
         <tbody>
             @forelse($events as $event)
                 <tr>
+                    <td style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-align: center;">{{ $loop->iteration }}</td>
                     <td class="text-bold">#{{ $event->id }}</td>
                     <td>
                         <div class="event-name">{{ $event->event_name }}</div>
