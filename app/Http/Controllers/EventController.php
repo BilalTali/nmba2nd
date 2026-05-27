@@ -970,6 +970,15 @@ class EventController extends Controller
             }
         }
 
+        $totalCount = $query->count();
+        $limit = 500;
+        $isTruncated = false;
+        
+        if ($totalCount > $limit) {
+            $query->limit($limit);
+            $isTruncated = true;
+        }
+
         $events = $query->get();
         $blocks = $this->getBlocks();
 
@@ -977,6 +986,9 @@ class EventController extends Controller
             'events' => $events,
             'blocks' => $blocks,
             'filters' => $request->only(['block_id', 'start_date', 'end_date', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
+            'totalCount' => $totalCount,
+            'isTruncated' => $isTruncated,
+            'limit' => $limit,
         ]);
     }
 

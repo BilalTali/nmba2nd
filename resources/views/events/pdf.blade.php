@@ -312,6 +312,31 @@
         .btn-print:hover {
             background: #d6921b;
         }
+
+        .warning-banner {
+            background-color: #fffbeb;
+            border: 1px solid #fde68a;
+            color: #b45309;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 11px;
+            line-height: 1.5;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        .warning-banner-icon {
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+
+        .warning-banner-text strong {
+            color: #92400e;
+        }
     </style>
 </head>
 <body>
@@ -334,9 +359,24 @@
         <div class="report-meta">
             <div class="report-title">Campaign Events Directory</div>
             <div class="meta-item">Generated: <span class="text-bold">{{ date('d M Y, h:i A') }}</span></div>
-            <div class="meta-item">Record Count: <span class="text-bold">{{ count($events) }} events</span></div>
+            <div class="meta-item">Record Count: <span class="text-bold">
+                @if(!empty($isTruncated) && $isTruncated)
+                    Showing {{ count($events) }} of {{ number_format($totalCount) }} events
+                @else
+                    {{ count($events) }} events
+                @endif
+            </span></div>
         </div>
     </header>
+
+    @if(!empty($isTruncated) && $isTruncated)
+        <div class="warning-banner no-print">
+            <div class="warning-banner-icon">⚠️</div>
+            <div class="warning-banner-text">
+                <strong>Performance Optimization Notice:</strong> To ensure fast PDF rendering and prevent browser crashes, the preview is limited to the first <strong>{{ $limit }}</strong> records. For the complete list of <strong>{{ number_format($totalCount) }}</strong> events, please use the <strong>Export CSV</strong> button on the main dashboard.
+            </div>
+        </div>
+    @endif
 
     <!-- Filter Context Summary -->
     <section class="filter-summary">
