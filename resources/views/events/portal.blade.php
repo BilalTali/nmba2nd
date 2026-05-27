@@ -585,6 +585,30 @@
             border: 1px solid #dcfce7;
         }
 
+        .badge-status-synced {
+            background: #ecfdf5;
+            color: #047857;
+            border: 1px solid #a7f3d0;
+        }
+
+        .badge-status-pending {
+            background: #fffbeb;
+            color: #b45309;
+            border: 1px solid #fde68a;
+        }
+
+        .badge-status-syncing {
+            background: #eff6ff;
+            color: #1d4ed8;
+            border: 1px solid #bfdbfe;
+        }
+
+        .badge-status-failed {
+            background: #fff1f2;
+            color: #be123c;
+            border: 1px solid #fecdd3;
+        }
+
         .event-attendance {
             font-family: 'Outfit', sans-serif;
             font-size: 1.1rem;
@@ -992,7 +1016,18 @@
                                 </td>
                                 <td>
                                     <div class="event-name">{{ $event->event_name }}</div>
-                                    <div class="event-id">#{{ $event->id }}</div>
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                                        <span class="event-id" style="margin-top: 0;">#{{ $event->id }}</span>
+                                        @if($event->sync_status === 'synced')
+                                            <span class="badge badge-status-synced">Synced</span>
+                                        @elseif($event->sync_status === 'pending')
+                                            <span class="badge badge-status-pending">Pending</span>
+                                        @elseif($event->sync_status === 'syncing')
+                                            <span class="badge badge-status-syncing">Syncing</span>
+                                        @else
+                                            <span class="badge badge-status-failed">Failed</span>
+                                        @endif
+                                    </div>
                                 </td>
                                 <td style="font-weight: 600; color: var(--primary-light);">
                                     {{ $event->event_date ? $event->event_date->format('d M Y') : 'N/A' }}
