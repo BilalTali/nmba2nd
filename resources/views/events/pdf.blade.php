@@ -495,14 +495,6 @@
         </tbody>
     </table>
 
-    <!-- Auto trigger browser print to prompt native high fidelity PDF generator -->
-    <script>
-        window.addEventListener('DOMContentLoaded', () => {
-            // Auto launch the print/save-as-PDF dialog 600ms after load (allowing styles to fully parse)
-            setTimeout(() => {
-                window.print();
-            }, 600);
-        });
-    </script>
+    <!-- Script is no longer auto-triggering print to avoid Out of Memory crashes. User can manually print using the print button. -->
 </body>
 </html>
