@@ -260,9 +260,9 @@
                 display: table-header-group;
             }
 
-            /* Set landscape print orientation and custom margin page numbering */
+            /* Set portrait print orientation and custom margin page numbering */
             @page {
-                size: A4 landscape;
+                size: A4 portrait;
                 margin: 15mm 15mm 15mm 15mm;
                 @top-left { content: none !important; }
                 @top-right { content: none !important; }
