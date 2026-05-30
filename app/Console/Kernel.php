@@ -35,7 +35,15 @@ class Kernel extends ConsoleKernel
                 return;
             }
 
-            // --- Guard 2: Queue flood protection ---
+            // --- Guard 2: Portal health check (Run first to ensure dashboard status is updated) ---
+            if (!$healthService->isAlive()) {
+                Log::channel('sync')->warning('Scheduler halted — portal health probe failed. Circuit breaker tripped.');
+                // Track offline state so checkPortalHealth / next scheduler run can detect recovery.
+                Cache::put('sre_last_portal_was_offline', true, now()->addHours(2));
+                return;
+            }
+
+            // --- Guard 3: Queue flood protection ---
             try {
                 $readyJobs = \Illuminate\Support\Facades\DB::table('jobs')
                     ->where('queue', 'default')
@@ -63,14 +71,6 @@ class Kernel extends ConsoleKernel
                 }
             } catch (\Exception $e) {
                 Log::channel('sync')->warning('Queue size check failed.', ['error' => $e->getMessage()]);
-            }
-
-            // --- Guard 3: Portal health pre-flight probe ---
-            if (!$healthService->isAlive()) {
-                Log::channel('sync')->warning('Scheduler halted — portal health probe failed. Circuit breaker tripped.');
-                // Track offline state so checkPortalHealth / next scheduler run can detect recovery.
-                Cache::put('sre_last_portal_was_offline', true, now()->addHours(2));
-                return;
             }
 
             // --- Portal Recovery Detection ---
