@@ -44,6 +44,21 @@ class Kernel extends ConsoleKernel
                     ->count();
                 if ($readyJobs > 100) {
                     Log::channel('sync')->warning('Scheduler skipped — ready queue backlog exceeds 100 entries.', ['ready_jobs' => $readyJobs]);
+                    
+                    if (app()->environment('local')) {
+                        Log::channel('sync')->info('Local Environment: Auto-recovery triggered. Clearing stale queue and rebooting workers...');
+                        
+                        // 1. Clear the queue programmatically
+                        \Illuminate\Support\Facades\Artisan::call('queue:clear', ['--force' => true]);
+                        
+                        // 2. Restart run_jobs.php cleanly in background
+                        $runJobsPath = base_path('run_jobs.php');
+                        $cmd = 'php ' . escapeshellarg($runJobsPath) . ' > /dev/null 2>&1 &';
+                        exec($cmd);
+                        
+                        Log::channel('sync')->info('Local Environment: Stale jobs cleared and run_jobs.php executed in background successfully.');
+                    }
+                    
                     return;
                 }
             } catch (\Exception $e) {
