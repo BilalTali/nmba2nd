@@ -63,20 +63,13 @@ class SyncEventJob implements ShouldQueue
         // Always refresh from DB to get the latest state — model may be stale from dispatch time.
         $this->event->refresh();
 
-        // Pre-flight health probe check: Check if the target portal is unreachable/offline
-        try {
-            $healthService = app(\App\Services\PortalHealthService::class);
-            if (!$healthService->isAlive()) {
-                Log::channel('sync')->info('Deferred Sync: Target portal is offline or circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.', [
-                    'event_id' => $this->event->id,
-                ]);
-                $this->delete();
-                return;
-            }
-        } catch (Exception $e) {
-            Log::channel('sync')->warning('Pre-flight portal health check failed in SyncEventJob.', [
-                'error' => $e->getMessage()
+        // Pre-flight circuit breaker check: skip processing if the circuit breaker is active.
+        if (\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') === true) {
+            Log::channel('sync')->info('Deferred Sync: Circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.', [
+                'event_id' => $this->event->id,
             ]);
+            $this->delete();
+            return;
         }
 
         // Cycle-reset: when attempts reach 9, reset the counter and return the event
@@ -180,7 +173,14 @@ class SyncEventJob implements ShouldQueue
         } catch (PermanentSyncException $e) {
             $this->handlePermanentFailure($e->getMessage());
         } catch (Exception $e) {
-            $this->handleTransientFailure('Unexpected exception: ' . $e->getMessage());
+            Log::channel('sync')->error('Unexpected exception during sync execution: ' . $e->getMessage(), [
+                'event_id'        => $this->event->id,
+                'exception_class' => get_class($e),
+                'file'            => $e->getFile(),
+                'line'            => $e->getLine(),
+                'trace'           => mb_substr($e->getTraceAsString(), 0, 2000),
+            ]);
+            $this->handleTransientFailure('Unexpected exception [' . get_class($e) . ']: ' . $e->getMessage());
         }
     }
 
@@ -247,12 +247,6 @@ class SyncEventJob implements ShouldQueue
         // Audit log: record transient failure before computing backoff
         $this->writeSyncLog('failure', null, $errorMessage);
 
-        // Trip the circuit breaker since we encountered a transient connection/portal failure!
-        try {
-            app(\App\Services\PortalHealthService::class)->tripCircuitBreaker($errorMessage);
-        } catch (\Throwable $cbEx) {
-            Log::channel('sync')->warning('Could not trip circuit breaker in handleTransientFailure: ' . $cbEx->getMessage());
-        }
 
         $this->event->refresh();
         $attempts = $this->event->sync_attempts;
@@ -335,7 +329,7 @@ class SyncEventJob implements ShouldQueue
                 'outcome'              => $outcome,
                 'worker_pid'           => getmypid() ?: null,
             ]);
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             // Audit logging must never break the job itself
             Log::channel('sync')->warning('Failed to write sync log entry.', [
                 'event_id' => $this->event->id,

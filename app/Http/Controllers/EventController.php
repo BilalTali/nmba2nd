@@ -610,14 +610,19 @@ class EventController extends Controller
         // This endpoint is polled every 15 seconds — must be fast and non-blocking.
         // Track whether the portal was offline on the previous poll so we can detect recovery.
         $wasOfflinePreviously = Cache::get('sre_last_portal_was_offline', false);
-        $isOnline = $healthService->isAlive(false);
+
+        // Read strictly from the cache to prevent slow HTTP requests from blocking the SAPI/serve process.
+        $isOnline = Cache::get('sre_portal_is_alive', false) === true 
+            && Cache::get('sre_circuit_breaker_portal_down') !== true;
+
         $isPaused = Cache::get('auto_sync_paused', false);
         $credentialsInvalid = Cache::get('portal_credentials_invalid', false);
 
         $pendingCount = Event::where('sync_status', 'pending')->count();
 
         // Record system telemetry
-        $this->recordTelemetry($pendingCount, $healthService->getLastResponseTime(), $isOnline);
+        $responseTime = $isOnline ? 0.1 : 60.0;
+        $this->recordTelemetry($pendingCount, $responseTime, $isOnline);
         $telemetry = $this->getTelemetryHistory();
 
         if (!$isOnline) {

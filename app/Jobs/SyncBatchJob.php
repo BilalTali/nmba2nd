@@ -91,21 +91,13 @@ class SyncBatchJob implements ShouldQueue
             'event_ids'   => $this->eventIds,
         ]);
 
-        // ── Guard: Portal health check ────────────────────────────────────────
-        try {
-            $healthService = app(PortalHealthService::class);
-            if (!$healthService->isAlive()) {
-                Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Portal is offline. Silently deleting job so scheduler can re-dispatch later.", [
-                    'slot' => $this->sessionSlot,
-                ]);
-                $this->delete();
-                return;
-            }
-        } catch (Exception $e) {
-            Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Portal health check threw an exception — proceeding anyway.", [
-                'slot'  => $this->sessionSlot,
-                'error' => $e->getMessage(),
+        // ── Guard: Circuit breaker check ──────────────────────────────────────
+        if (Cache::get('sre_circuit_breaker_portal_down') === true) {
+            Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.", [
+                'slot' => $this->sessionSlot,
             ]);
+            $this->delete();
+            return;
         }
 
         // ── Step 1: Establish portal session (one login for the whole batch) ──
@@ -121,12 +113,6 @@ class SyncBatchJob implements ShouldQueue
                 'slot'  => $this->sessionSlot,
                 'error' => $e->getMessage(),
             ]);
-            // Trip circuit breaker and release for retry
-            try {
-                app(PortalHealthService::class)->tripCircuitBreaker($e->getMessage());
-            } catch (\Throwable $cbEx) {
-                Log::channel('sync')->warning("Could not trip circuit breaker: " . $cbEx->getMessage());
-            }
             $this->release(300);
             return;
         } catch (Exception $e) {

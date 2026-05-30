@@ -11,7 +11,7 @@ use Symfony\Component\DomCrawler\Crawler;
 class PortalHealthService
 {
     protected string $loginUrl;
-    protected int $timeout = 15;
+    protected int $timeout = 60;
     protected float $lastResponseTime = 0.0;
 
     public function __construct()
