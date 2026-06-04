@@ -248,17 +248,11 @@ class SyncBatchJob implements ShouldQueue
             } catch (TransientSyncException $e) {
                 $this->writeSyncLog($event, 'failure', null, $e->getMessage());
 
-                // Compute exponential backoff delay (same formula as SyncEventJob)
-                $attempts  = $event->sync_attempts;
-                $baseDelay = match (true) {
-                    $attempts <= 3 => 300,
-                    $attempts <= 6 => 900,
-                    default        => 3600,
-                };
-                $delaySeconds = (int) ($baseDelay * pow(2, min($attempts, 5))) + random_int(30, 120);
+                // Set rest time to exactly 1 minute (60 seconds)
+                $delaySeconds = 60;
 
                 $event->markFailed($e->getMessage());
-                Cache::put("sre_sync_dispatch_lock_{$eventId}", true, $delaySeconds + 120);
+                Cache::put("sre_sync_dispatch_lock_{$eventId}", true, $delaySeconds + 30);
 
                 Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Transient failure for event {$eventId}. Backoff set.", [
                     'slot'         => $this->sessionSlot,

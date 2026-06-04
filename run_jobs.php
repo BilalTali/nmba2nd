@@ -83,8 +83,17 @@ exec($cmd);
 ok('Scheduler started  →  storage/logs/scheduler.log');
 line();
 
-// ── STEP 4: Dispatch all pending events ───────────────────────────
-info('Step 5/5 — Dispatching all pending events into queue...');
+// ── STEP 5: Clear old queue entries and reset dispatch locks ───────
+info('Step 5/5 — Clearing old queue jobs and resetting dispatch locks...');
+try {
+    if (config('queue.default') === 'database' && \Illuminate\Support\Facades\Schema::hasTable('jobs')) {
+        $cleared = DB::table('jobs')->where('queue', 'default')->delete();
+        ok("Cleared {$cleared} old/stuck jobs from the database queue.");
+    }
+} catch (Exception $e) {
+    warn('Could not clear jobs table: ' . $e->getMessage());
+}
+
 /** @var \Illuminate\Database\Eloquent\Collection<int, Event> $events */
 $events = Event::where('sync_status', 'pending')->get();
 $count  = $events->count();
@@ -93,10 +102,10 @@ if ($count === 0) {
     warn('No pending events found — queue is already empty.');
 } else {
     foreach ($events as $event) {
-        /** @var Event $event */
-        dispatch(new SyncEventJob($event));
+        Cache::forget("manual_override_{$event->id}");
+        Cache::forget("sre_sync_dispatch_lock_{$event->id}");
     }
-    ok("Dispatched {$count} pending events into the queue.");
+    ok("Reset dispatch locks for {$count} pending events.");
 }
 line();
 
@@ -105,7 +114,7 @@ banner('All systems running!');
 line();
 line('  Queue Workers  : ' . NUM_WORKERS . ' workers running in background');
 line('  Scheduler      : Running (sweeps every minute via schedule:work)');
-line('  Events Queued  : ' . $count . ' pending events dispatched');
+line('  Events Pending : ' . $count . ' events ready for scheduler orchestration');
 line();
 line('  Logs:');
 line('    Workers    → storage/logs/queue-worker-[0-7].log');

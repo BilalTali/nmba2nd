@@ -127,8 +127,7 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function buildClient(CookieJar $cookieJar): Client
     {
-        $isCli = (php_sapi_name() === 'cli');
-        $timeout = $isCli ? 180 : 60; // 3 minutes on CLI, 60 seconds on Web SAPI (e.g. cron request)
+        $timeout = 45; // 45 seconds timeout to accommodate image uploads on slower connections while preventing hangs
 
         return new Client([
             'version'         => 2.0,

@@ -127,7 +127,7 @@ class Kernel extends ConsoleKernel
             })
             ->whereBetween('sync_attempts', [0, 9])
             ->orderBy('created_at', 'asc')
-            ->limit(160) // 8 parallel slots × 20 events each
+            ->limit((int) env('SYNC_MAX_SLOTS', 8) * 20) // slots × 20 events each (env-controlled)
             ->get();
 
             if ($events->isEmpty()) {
@@ -152,8 +152,9 @@ class Kernel extends ConsoleKernel
             // Each slot gets an isolated portal session (its own cookie jar + transmission lock).
             $slotIndex = 0;
             foreach ($dispatchable->chunk(20) as $batch) {
-                if ($slotIndex >= 8) {
-                    break; // Maximum of 8 concurrent portal sessions
+                $maxSlots = (int) env('SYNC_MAX_SLOTS', 8);
+                if ($slotIndex >= $maxSlots) {
+                    break; // Maximum concurrent portal sessions (env: SYNC_MAX_SLOTS)
                 }
 
                 $batchIds = $batch->pluck('id')->toArray();
@@ -171,6 +172,13 @@ class Kernel extends ConsoleKernel
 
                 dispatch(new SyncBatchJob($batchIds, $slotIndex));
 
+                // Place a temporary 10-minute dispatch lock on all events in this batch.
+                // This prevents subsequent scheduler sweeps from duplicate-selecting them
+                // while this slot worker is actively processing them in the background.
+                foreach ($batchIds as $id) {
+                    Cache::put("sre_sync_dispatch_lock_{$id}", true, now()->addMinutes(10));
+                }
+
                 Log::channel('sync')->info("Scheduler dispatched SyncBatchJob.", [
                     'slot'        => $slotIndex,
                     'event_count' => count($batchIds),
@@ -180,14 +188,14 @@ class Kernel extends ConsoleKernel
                 $slotIndex++;
             }
 
-        })->everyMinute()->name('nmba_sync_orchestration_sweep')->withoutOverlapping();
+        })->everyMinute()->name('nmba_sync_orchestration_sweep')->withoutOverlapping(2);
 
         // FIX-OPS-01: Alert if events are stuck in pending for over 30 minutes.
         // Runs every 15 minutes. Sends email to ADMIN_EMAIL and writes to sync-health.log.
         $schedule->command('sync:health-check')
             ->everyFifteenMinutes()
             ->name('nmba_sync_health_check')
-            ->withoutOverlapping()
+            ->withoutOverlapping(15)
             ->appendOutputTo(storage_path('logs/sync-health-scheduler.log'));
 
         // FIX-SEC-02: Weekly portal credential validation.

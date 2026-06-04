@@ -11,7 +11,7 @@ use Symfony\Component\DomCrawler\Crawler;
 class PortalHealthService
 {
     protected string $loginUrl;
-    protected int $timeout = 60;
+    protected int $timeout = 30;
     protected float $lastResponseTime = 0.0;
 
     public function __construct()
@@ -41,15 +41,15 @@ class PortalHealthService
         }
 
         $client = new Client([
-            'version'         => 2.0,
-            'timeout'         => $this->timeout,
+            'version' => 2.0,
+            'timeout' => $this->timeout,
             'connect_timeout' => $this->timeout,
             'allow_redirects' => true,
-            'headers'         => [
+            'headers' => [
                 'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept'     => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             ],
-            'curl'            => [
+            'curl' => [
                 CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
             ],
         ]);
@@ -109,7 +109,7 @@ class PortalHealthService
     public function tripCircuitBreaker(string $reason): void
     {
         Log::channel('sync')->alert('Circuit breaker tripped — portal unreachable or structurally degraded.', [
-            'reason'   => $reason,
+            'reason' => $reason,
             'cooldown' => '1 minute',
         ]);
 

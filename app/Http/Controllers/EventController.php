@@ -468,23 +468,26 @@ class EventController extends Controller
             Cache::forget('sre_consecutive_auth_failures');
             Cache::forget('portal_credentials_invalid');
 
-            // Retrieve currently queued event IDs to avoid duplicate dispatching
-            $queuedIds = $this->getQueuedEventIds();
-
-            // Unlock manual override and re-dispatch all pending events.
-            // Uses chunk() to safely handle large datasets without memory exhaustion.
+            // Unlock manual override and reset dispatch locks for all pending events.
+            // Let the high-performance scheduler sweep (orchestration slots 0-7) naturally
+            // pull these events and dispatch them in parallel SyncBatchJobs, avoiding the
+            // serialization and queue flood issues of dispatching them as SyncEventJobs.
             Event::where('sync_status', 'pending')
-                ->chunk(100, function ($pendingEvents) use ($queuedIds) {
+                ->chunk(100, function ($pendingEvents) {
                     foreach ($pendingEvents as $event) {
                         Cache::forget("manual_override_{$event->id}");
                         Cache::forget("sre_sync_dispatch_lock_{$event->id}");
-                        
-                        // ONLY dispatch if the job is not already in the jobs table
-                        if (!isset($queuedIds[$event->id])) {
-                            dispatch(new SyncEventJob($event));
-                        }
                     }
                 });
+
+            // Clean the queue of any legacy/orphaned default queue jobs to keep it clean and performant.
+            try {
+                if (config('queue.default') === 'database' && \Illuminate\Support\Facades\Schema::hasTable('jobs')) {
+                    DB::table('jobs')->where('queue', 'default')->delete();
+                }
+            } catch (\Throwable $jobEx) {
+                Log::channel('sync')->warning('Could not clear queue during forceSync: ' . $jobEx->getMessage());
+            }
 
             // Immediately trigger the queue worker to process jobs in the background.
             $this->runQueueWorkerInBackground();
@@ -1094,7 +1097,7 @@ class EventController extends Controller
 
         $deletedCount = 0;
 
-        /** @var \App\Models\Event $event */
+        /** @var Event $event */
         foreach ($events as $event) {
             $paths = $event->photo_paths;
             if (is_array($paths)) {
@@ -1146,9 +1149,12 @@ class EventController extends Controller
                     $line = trim($line);
                     if (empty($line)) continue;
                     
-                    $lines[$index] = $line;
-                    $index = ($index + 1) % 300;
-                    $count++;
+                    // Only collect lines that are actual Laravel log entries matching the standard header format
+                    if (preg_match('/^\[(.*?)\] (.*?)\.(.*?): (.*)$/', $line)) {
+                        $lines[$index] = $line;
+                        $index = ($index + 1) % 300;
+                        $count++;
+                    }
                 }
                 fclose($handle);
             }

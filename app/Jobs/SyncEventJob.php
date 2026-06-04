@@ -247,29 +247,18 @@ class SyncEventJob implements ShouldQueue
         // Audit log: record transient failure before computing backoff
         $this->writeSyncLog('failure', null, $errorMessage);
 
-
         $this->event->refresh();
         $attempts = $this->event->sync_attempts;
 
-        // Tiered base delay escalation: fast initial retries, slow later retries.
-        $baseDelay = match (true) {
-            $attempts <= 3 => 300,
-            $attempts <= 6 => 900,
-            default        => 3600,
-        };
-
-        // Exponential multiplier capped at 2^5=32 to prevent infinite delay growth.
-        $exponentialMultiplier = pow(2, min($attempts, 5));
-
-        // Add random jitter (30–120s) to prevent synchronized retry storms across workers.
-        $delaySeconds = (int) ($baseDelay * $exponentialMultiplier) + random_int(30, 120);
+        // Set rest time to exactly 1 minute (60 seconds)
+        $delaySeconds = 60;
 
         $this->event->markFailed($errorMessage);
 
-        // Update dispatch lock to align with the backoff delay (plus 120s buffer)
-        \Illuminate\Support\Facades\Cache::put("sre_sync_dispatch_lock_{$this->event->id}", true, $delaySeconds + 120);
+        // Update dispatch lock to align with the backoff delay (plus 30s buffer)
+        \Illuminate\Support\Facades\Cache::put("sre_sync_dispatch_lock_{$this->event->id}", true, $delaySeconds + 30);
 
-        Log::channel('sync')->warning('Transient sync failure. Job released with exponential backoff.', [
+        Log::channel('sync')->warning('Transient sync failure. Job released with 60-second backoff.', [
             'event_id'      => $this->event->id,
             'unique_hash'   => $this->event->unique_hash,
             'sync_status'   => 'pending',
