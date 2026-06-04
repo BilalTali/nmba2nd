@@ -127,7 +127,13 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function buildClient(CookieJar $cookieJar): Client
     {
-        $timeout = 45; // 45 seconds timeout to accommodate image uploads on slower connections while preventing hangs
+        // Fetch the last known response time of the portal (default 5.0 seconds if unknown)
+        $lastResponseTime = (float) Cache::get('sre_portal_response_time', 5.0);
+
+        // Calculate dynamic timeout: response time * 5 (giving it 5x the login page load time)
+        // Clamp it between 10 and 60 seconds.
+        $calculatedTimeout = (int) ceil($lastResponseTime * 5);
+        $timeout = max(10, min(60, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
@@ -210,6 +216,7 @@ class HttpPortalSyncService implements PortalSyncInterface
         try {
             $response = $client->get($this->loginUrl);
         } catch (ConnectException $e) {
+            app(\App\Services\PortalHealthService::class)->tripCircuitBreaker("Socket connection failed during login handshake: {$e->getMessage()}");
             throw new TransientSyncException(
                 "Socket connection failed during login handshake: {$e->getMessage()}", 0, $e
             );
@@ -276,11 +283,15 @@ class HttpPortalSyncService implements PortalSyncInterface
                 );
             }
         } catch (ConnectException $e) {
+            app(\App\Services\PortalHealthService::class)->tripCircuitBreaker("Network loss during authentication transmission: {$e->getMessage()}");
             throw new TransientSyncException(
                 "Network loss during authentication transmission: {$e->getMessage()}", 0, $e
             );
         } catch (RequestException $e) {
             $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : 500;
+            if ($status >= 500) {
+                app(\App\Services\PortalHealthService::class)->tripCircuitBreaker("Portal returned HTTP {$status} error during authentication.");
+            }
             throw new TransientSyncException(
                 "Portal returned HTTP {$status} error during authentication: {$e->getMessage()}", 0, $e
             );
@@ -359,6 +370,12 @@ class HttpPortalSyncService implements PortalSyncInterface
     {
         if ($event->sync_status === 'synced') {
             return true;
+        }
+
+        // --- Confirm target site is alive before attempting sync ---
+        $healthService = app(\App\Services\PortalHealthService::class);
+        if (!$healthService->isAlive()) {
+            throw new TransientSyncException('Portal health check failed before sync. Target site is down or circuit breaker is active.');
         }
 
         // ── Batch mode: pre-authenticated client already available ────────────
@@ -522,12 +539,14 @@ class HttpPortalSyncService implements PortalSyncInterface
                     }
                 );
             } catch (ConnectException $e) {
+                app(\App\Services\PortalHealthService::class)->tripCircuitBreaker("Connection lost during multipart upload: {$e->getMessage()}");
                 throw new TransientSyncException(
                     "Connection lost during multipart upload: {$e->getMessage()}", 0, $e
                 );
             } catch (RequestException $e) {
                 $status = $e->hasResponse() ? $e->getResponse()->getStatusCode() : 500;
                 if ($status >= 500) {
+                    app(\App\Services\PortalHealthService::class)->tripCircuitBreaker("Downstream server error HTTP {$status} during upload.");
                     throw new TransientSyncException(
                         "Downstream server error HTTP {$status}.", 0, $e
                     );

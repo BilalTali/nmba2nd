@@ -58,6 +58,7 @@ class PortalHealthService
         try {
             $response = $client->get($this->loginUrl);
             $this->lastResponseTime = microtime(true) - $startTime;
+            Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
 
             if ($response->getStatusCode() !== 200) {
                 if (!$bypassCache) {
@@ -96,6 +97,7 @@ class PortalHealthService
 
         } catch (Exception $e) {
             $this->lastResponseTime = microtime(true) - $startTime;
+            Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
             if (!$bypassCache) {
                 $this->tripCircuitBreaker($e->getMessage());
             }

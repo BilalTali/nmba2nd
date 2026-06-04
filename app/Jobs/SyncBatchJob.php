@@ -129,6 +129,12 @@ class SyncBatchJob implements ShouldQueue
         $failureCount = 0;
 
         foreach ($this->eventIds as $eventId) {
+            // Guard: Stop mid-batch if circuit breaker tripped
+            if (Cache::get('sre_circuit_breaker_portal_down') === true) {
+                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker tripped mid-batch. Halting remaining events.");
+                break;
+            }
+
             $event = Event::find($eventId);
 
             // Skip if event no longer exists or is already synced
