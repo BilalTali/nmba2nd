@@ -57,7 +57,10 @@ class BlockEventController extends Controller
 
     public function create()
     {
-        return Inertia::render('Block/Events/Create');
+        $departments = \App\Models\Department::orderBy('name')->pluck('name', 'id')->toArray();
+        return Inertia::render('Block/Events/Create', [
+            'departments' => $departments,
+        ]);
     }
 
     public function store(StoreEventRequest $request)
@@ -102,14 +105,7 @@ class BlockEventController extends Controller
             $coordinatorName
         );
 
-        $submissionId = Event::generateSubmissionId(
-            $validated['event_name'],
-            $validated['event_date'],
-            $validated['event_venue'],
-            (int) $validated['actual_attendance'],
-            (int) auth()->user()->block_id,
-            $coordinatorName
-        );
+
 
         \Illuminate\Support\Facades\DB::beginTransaction();
         try {
@@ -144,8 +140,8 @@ class BlockEventController extends Controller
                     'district_name'        => config('app.district_name'),
                     'photo_paths'          => $photoPaths,
                     'sync_status'          => 'pending',
-                    'unique_hash'          => $submissionId,
-                    'submission_id'        => $submissionId,
+                    'unique_hash'          => $semanticHash,
+                    'submission_id'        => $semanticHash,
                     'semantic_hash'        => $semanticHash,
                     'uploader_ip'          => $request->ip(),
                 ]

@@ -21,7 +21,7 @@ const getOrCreateDeviceUuid = () => {
     return uuid;
 };
 
-export default function Create({ blocks }) {
+export default function Create({ blocks, departments }) {
     const todayStr = new Date().toISOString().split('T')[0];
 
     const { data, setData, post, processing, errors } = useForm({
@@ -31,6 +31,7 @@ export default function Create({ blocks }) {
         event_category: [],
         event_category_remark: '',
         block_id: '',
+        department_id: '',
         ward: '',
         village: '',
         actual_attendance: '',
@@ -189,6 +190,18 @@ export default function Create({ blocks }) {
                                                 ))}
                                             </select>
                                             {errors.block_id && <p className="text-red-500 text-xs mt-1">{errors.block_id}</p>}
+                                        </div>
+
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700">Department <span className="font-normal text-slate-400 text-xs">(Optional)</span></label>
+                                            <select value={data.department_id} onChange={e => setData('department_id', e.target.value)}
+                                                className="mt-2 block w-full rounded-xl border-slate-200 bg-slate-50 py-3 px-4 shadow-sm focus:border-emerald-500 focus:ring-emerald-500 focus:bg-white transition-all">
+                                                <option value="">Select Department</option>
+                                                {departments && Object.entries(departments).map(([id, name]) => (
+                                                    <option key={id} value={id}>{name}</option>
+                                                ))}
+                                            </select>
+                                            {errors.department_id && <p className="text-red-500 text-xs mt-1">{errors.department_id}</p>}
                                         </div>
 
                                         <div>

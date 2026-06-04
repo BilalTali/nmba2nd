@@ -55,7 +55,7 @@ Route::middleware(['auth', 'admin'])->group(function () {
     Route::get('/admin/synced-events', [\App\Http\Controllers\EventController::class, 'syncedEventsIndex'])->name('admin.synced-events');
     Route::get('/admin/events/pdf', [\App\Http\Controllers\EventController::class, 'exportPdf'])->name('admin.events.pdf');
     Route::get('/admin/events-portal', function (\Illuminate\Http\Request $request) {
-        $query = \App\Models\Event::query();
+        $query = \App\Models\Event::with(['department']);
 
         // 1. Apply Dynamic Filters
         if ($request->filled('start_date')) {
@@ -71,6 +71,14 @@ Route::middleware(['auth', 'admin'])->group(function () {
                 $query->where('block_id', $block->id);
             } else {
                 $query->where('block_id', 0); // No match
+            }
+        }
+        if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
+            $department = \App\Models\Department::where('name', $request->department_id)->first();
+            if ($department) {
+                $query->where('department_id', $department->id);
+            } else {
+                $query->where('department_id', 0);
             }
         }
         if ($request->filled('category') && $request->category !== 'All Categories') {
@@ -112,6 +120,7 @@ Route::middleware(['auth', 'admin'])->group(function () {
 
         // 3. Prepare Chart Data
         $blocks = \App\Models\Block::pluck('name', 'id')->toArray();
+        $departments = \App\Models\Department::pluck('name', 'id')->toArray();
         
         // Events by Block
         $eventsByBlockRaw = (clone $query)->select('block_id', \DB::raw('count(*) as count'))
@@ -164,12 +173,13 @@ Route::middleware(['auth', 'admin'])->group(function () {
             'participantsByBlock' => $participantsByBlock,
             'events' => $events,
             'blocks' => $blocks,
-            'filters' => $request->only(['start_date', 'end_date', 'block_id', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
+            'departments' => $departments,
+            'filters' => $request->only(['start_date', 'end_date', 'block_id', 'department_id', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
         ]);
     })->name('admin.events.portal');
 
     Route::get('/admin/events-portal/export', function (\Illuminate\Http\Request $request) {
-        $query = \App\Models\Event::query();
+        $query = \App\Models\Event::with(['department']);
 
         // Apply the same filters
         if ($request->filled('start_date')) {
@@ -184,6 +194,14 @@ Route::middleware(['auth', 'admin'])->group(function () {
                 $query->where('block_id', $block->id);
             } else {
                 $query->where('block_id', 0);
+            }
+        }
+        if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
+            $department = \App\Models\Department::where('name', $request->department_id)->first();
+            if ($department) {
+                $query->where('department_id', $department->id);
+            } else {
+                $query->where('department_id', 0);
             }
         }
         if ($request->filled('category') && $request->category !== 'All Categories') {
@@ -227,7 +245,7 @@ Route::middleware(['auth', 'admin'])->group(function () {
 
         $columns = [
             'ID', 'Event Name', 'Event Date', 'Event Venue', 'Categories', 
-            'Block Name', 'Village', 'Attendance', 'Audience', 'Coordinator', 'Contact'
+            'Block Name', 'Department', 'Village', 'Attendance', 'Audience', 'Coordinator', 'Contact'
         ];
 
         $callback = function() use($events, $columns, $blocks) {
@@ -242,6 +260,7 @@ Route::middleware(['auth', 'admin'])->group(function () {
                     $event->event_venue,
                     is_array($event->event_category) ? implode(', ', $event->event_category) : $event->event_category,
                     $blocks[$event->block_id] ?? 'Unknown',
+                    $event->department->name ?? '',
                     $event->village ?? '',
                     $event->actual_attendance,
                     is_array($event->target_audience) ? implode(', ', $event->target_audience) : $event->target_audience,

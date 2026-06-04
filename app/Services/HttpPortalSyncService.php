@@ -129,11 +129,15 @@ class HttpPortalSyncService implements PortalSyncInterface
     {
         // Fetch the last known response time of the portal (default 5.0 seconds if unknown)
         $lastResponseTime = (float) Cache::get('sre_portal_response_time', 5.0);
+        
+        // If the last response was a fast failure (e.g. instant connection reset), 
+        // don't shrink the timeout unrealistically. Assume a minimum 5-second baseline.
+        $effectiveResponseTime = max(5.0, $lastResponseTime);
 
-        // Calculate dynamic timeout: response time * 5 (giving it 5x the login page load time)
-        // Clamp it between 10 and 60 seconds.
-        $calculatedTimeout = (int) ceil($lastResponseTime * 5);
-        $timeout = max(10, min(60, $calculatedTimeout));
+        // Calculate dynamic timeout: response time * 5
+        // Clamp it between 25 and 60 seconds to allow for portal latency spikes.
+        $calculatedTimeout = (int) ceil($effectiveResponseTime * 5);
+        $timeout = max(25, min(60, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,

@@ -28,6 +28,11 @@ class EventController extends Controller
         return \App\Models\Block::orderBy('name')->pluck('name', 'id')->toArray();
     }
 
+    private function getDepartments(): array
+    {
+        return \App\Models\Department::orderBy('name')->pluck('name', 'id')->toArray();
+    }
+
     public function dashboard(): \Inertia\Response
     {
         $autoSyncPaused = Cache::get('auto_sync_paused', false);
@@ -238,7 +243,10 @@ class EventController extends Controller
 
     public function create()
     {
-        return \Inertia\Inertia::render('Events/Create', ['blocks' => $this->getBlocks()]);
+        return \Inertia\Inertia::render('Events/Create', [
+            'blocks' => $this->getBlocks(),
+            'departments' => $this->getDepartments(),
+        ]);
     }
 
     public function store(StoreEventRequest $request): RedirectResponse
@@ -979,7 +987,7 @@ class EventController extends Controller
         }
 
         $totalCount = $query->count();
-        $limit = 500;
+        $limit = 5000;
         $isTruncated = false;
         
         if ($totalCount > $limit) {

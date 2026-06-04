@@ -22,7 +22,7 @@ use App\Models\Event;
 use App\Jobs\SyncEventJob;
 
 // ── CONFIG ────────────────────────────────────────────────────────
-define('NUM_WORKERS', 8);
+define('NUM_WORKERS', 5);
 define('PHP_BIN',    PHP_BINARY);
 define('ARTISAN',    __DIR__ . '/artisan');
 define('LOG_DIR',    __DIR__ . '/storage/logs');
@@ -62,7 +62,7 @@ Cache::forget('portal_credentials_invalid');
 ok('Circuit breaker reset — syncing unblocked.');
 line();
 
-// ── STEP 3: Start 8 queue workers in background ───────────────────
+// ── STEP 3: Start 3 queue workers in background ───────────────────
 info('Step 3/5 — Starting ' . NUM_WORKERS . ' queue workers in background...');
 for ($i = 0; $i < NUM_WORKERS; $i++) {
     $logFile = LOG_DIR . "/queue-worker-{$i}.log";

@@ -48,6 +48,7 @@ class Event extends Model
         'district_id',
         'district_name',
         'block_id',
+        'department_id',
         'ward',
         'village',
         'attendance_range',
@@ -80,6 +81,7 @@ class Event extends Model
         'photo_paths'        => 'array',
         'actual_attendance'  => 'integer',
         'block_id'           => 'integer',
+        'department_id'      => 'integer',
         'district_id'        => 'integer',
         'sync_attempts'      => 'integer',
         'last_attempt_at'    => 'datetime',
@@ -96,6 +98,16 @@ class Event extends Model
     {
         return $this->hasMany(\App\Models\EventSyncLog::class, 'event_id')
                     ->orderBy('attempted_at', 'desc');
+    }
+
+    public function block()
+    {
+        return $this->belongsTo(Block::class);
+    }
+
+    public function department()
+    {
+        return $this->belongsTo(Department::class);
     }
 
     // ── Query Scopes ──────────────────────────────────────────────

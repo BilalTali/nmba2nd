@@ -807,6 +807,17 @@
                         </select>
                     </div>
 
+                    <!-- Department Dropdown -->
+                    <div class="fg">
+                        <label>Department</label>
+                        <select name="department_id">
+                            <option value="All Departments">All Departments</option>
+                            @foreach($departments as $id => $name)
+                                <option value="{{ $name }}" {{ ($filters['department_id'] ?? '') === $name ? 'selected' : '' }}>{{ $name }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+
                     <!-- Category Dropdown -->
                     <div class="fg">
                         <label>Event Category</label>
@@ -1040,6 +1051,11 @@
                                             <span style="opacity: 0.7;">— {{ $event->village }}</span>
                                         @endif
                                     </div>
+                                    @if($event->department)
+                                    <div class="event-block" style="margin-top: 2px;">
+                                        Dept: <strong style="color: var(--primary);">{{ $event->department->name }}</strong>
+                                    </div>
+                                    @endif
                                 </td>
                                 <td>
                                     <div class="badges">

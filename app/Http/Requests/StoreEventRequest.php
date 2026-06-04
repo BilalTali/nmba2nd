@@ -86,6 +86,12 @@ class StoreEventRequest extends FormRequest
                 Rule::exists('blocks', 'id'),
             ],
 
+            // Department
+            'department_id' => [
+                'nullable', 'integer',
+                Rule::exists('departments', 'id'),
+            ],
+
             // Optional location fields
             'ward'    => ['nullable', 'string', 'max:100'],
             'village' => ['nullable', 'string', 'max:255'],
