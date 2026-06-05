@@ -14,9 +14,14 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
+use App\Traits\SharedCacheTrait;
+
 class EventController extends Controller
 {
+    use SharedCacheTrait;
+
     protected ImageOptimizationService $imageService;
+
 
     public function __construct(ImageOptimizationService $imageService)
     {
@@ -35,8 +40,8 @@ class EventController extends Controller
 
     public function dashboard(): \Inertia\Response
     {
-        $autoSyncPaused = Cache::get('auto_sync_paused', false);
-        $portalCredentialsInvalid = Cache::get('portal_credentials_invalid', false);
+        $autoSyncPaused = $this->getSharedValue('auto_sync_paused', false);
+        $portalCredentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
         // Cache dashboard counts for 30 seconds to completely eliminate DB pressure under heavy polling
         $cachedMetrics = Cache::remember('dashboard_metrics_counts', 30, function () {
@@ -470,11 +475,11 @@ class EventController extends Controller
             }
 
             // Clear the circuit breaker so sync attempts can proceed immediately.
-            Cache::forget('sre_circuit_breaker_portal_down');
-            Cache::put('sre_portal_is_alive', true, now()->addMinutes(5));
-            Cache::forget('auto_sync_paused');
-            Cache::forget('sre_consecutive_auth_failures');
-            Cache::forget('portal_credentials_invalid');
+            $this->forgetSharedValue('sre_circuit_breaker_portal_down');
+            $this->setSharedValue('sre_portal_is_alive', true, 300);
+            $this->forgetSharedValue('auto_sync_paused');
+            $this->forgetSharedValue('sre_consecutive_auth_failures');
+            $this->forgetSharedValue('portal_credentials_invalid');
 
             // Unlock manual override and reset dispatch locks for all pending events.
             // Let the high-performance scheduler sweep (orchestration slots 0-7) naturally
@@ -620,14 +625,14 @@ class EventController extends Controller
     {
         // This endpoint is polled every 15 seconds — must be fast and non-blocking.
         // Track whether the portal was offline on the previous poll so we can detect recovery.
-        $wasOfflinePreviously = Cache::get('sre_last_portal_was_offline', false);
+        $wasOfflinePreviously = $this->getSharedValue('sre_last_portal_was_offline', false);
 
         // Read strictly from the cache to prevent slow HTTP requests from blocking the SAPI/serve process.
-        $isOnline = Cache::get('sre_portal_is_alive', false) === true 
-            && Cache::get('sre_circuit_breaker_portal_down') !== true;
+        $isOnline = $this->getSharedValue('sre_portal_is_alive', false) === true 
+            && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true;
 
-        $isPaused = Cache::get('auto_sync_paused', false);
-        $credentialsInvalid = Cache::get('portal_credentials_invalid', false);
+        $isPaused = $this->getSharedValue('auto_sync_paused', false);
+        $credentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
         $pendingCount = Event::where('sync_status', 'pending')->count();
 
@@ -638,7 +643,7 @@ class EventController extends Controller
 
         if (!$isOnline) {
             // Persist the offline state so the next poll can detect the recovery.
-            Cache::put('sre_last_portal_was_offline', true, now()->addHours(2));
+            $this->setSharedValue('sre_last_portal_was_offline', true, 7200);
             return response()->json([
                 'status'           => 'offline',
                 'pending_count'    => $pendingCount,
@@ -659,7 +664,7 @@ class EventController extends Controller
         //   2. Queue jobs with a far-future available_at (from exponential backoff release()).
         // Both must be cleared so the scheduler and queue worker can act on them immediately.
         if ($wasOfflinePreviously) {
-            Cache::forget('sre_last_portal_was_offline');
+            $this->forgetSharedValue('sre_last_portal_was_offline');
             $recoveredFromOutage = true;
 
             Log::channel('sync')->info('Portal back online — outage recovery triggered.', [
@@ -811,8 +816,8 @@ class EventController extends Controller
      */
     public function toggleAutoSync(): RedirectResponse
     {
-        $isPaused = Cache::get('auto_sync_paused', false);
-        Cache::put('auto_sync_paused', !$isPaused);
+        $isPaused = $this->getSharedValue('auto_sync_paused', false);
+        $this->setSharedValue('auto_sync_paused', !$isPaused, 86400 * 365);
 
         $message = !$isPaused 
             ? 'Automatic synchronization has been PAUSED! Sync queue will hold pending items.' 
@@ -849,6 +854,14 @@ class EventController extends Controller
         if ($isLocalhost) {
             return;
         }
+
+        // Guard against duplicate concurrent background worker invocations
+        // Limits background worker spawning to maximum once per 60 seconds
+        $spawnLockKey = 'sre_background_worker_spawn_lock';
+        if (Cache::has($spawnLockKey)) {
+            return;
+        }
+        Cache::put($spawnLockKey, true, 60);
 
         // Try local exec() fallback first (for environments where exec is enabled)
         try {

@@ -19,8 +19,12 @@ use Symfony\Component\DomCrawler\Crawler;
 
 use GuzzleHttp\Cookie\SetCookie;
 
+use App\Traits\SharedCacheTrait;
+
 class HttpPortalSyncService implements PortalSyncInterface
 {
+    use SharedCacheTrait;
+
     protected string $baseUrl;
     protected string $loginUrl;
     protected string $submitUrl;
@@ -103,8 +107,15 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function loadCookieJar(): CookieJar
     {
-        $cookieJar     = new CookieJar();
-        $cachedCookies = Cache::get($this->cookieCacheKey());
+        $cookieJar = new CookieJar();
+        $sharedPath = $this->getSharedPath("cookies_slot_{$this->sessionSlot}.json");
+
+        if ($sharedPath && file_exists($sharedPath)) {
+            $content = @file_get_contents($sharedPath);
+            $cachedCookies = json_decode($content, true);
+        } else {
+            $cachedCookies = Cache::get($this->cookieCacheKey());
+        }
 
         if (is_array($cachedCookies)) {
             foreach ($cachedCookies as $cookieArray) {
@@ -119,8 +130,15 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function saveCookieJar(CookieJar $cookieJar): void
     {
+        $cookieArray = $cookieJar->toArray();
+        $sharedPath = $this->getSharedPath("cookies_slot_{$this->sessionSlot}.json");
+
+        if ($sharedPath) {
+            @file_put_contents($sharedPath, json_encode($cookieArray));
+        }
+
         // 30-minute TTL — portal sessions typically expire in ~60 min.
-        Cache::put($this->cookieCacheKey(), $cookieJar->toArray(), now()->addMinutes(30));
+        Cache::put($this->cookieCacheKey(), $cookieArray, now()->addMinutes(30));
     }
 
     // ── Guzzle Client Factory ─────────────────────────────────────────────────
@@ -137,7 +155,7 @@ class HttpPortalSyncService implements PortalSyncInterface
         // Calculate dynamic timeout: response time * 5
         // Clamp it between 25 and 60 seconds to allow for portal latency spikes.
         $calculatedTimeout = (int) ceil($effectiveResponseTime * 5);
-        $timeout = max(25, min(60, $calculatedTimeout));
+        $timeout = max(60, min(120, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
@@ -502,8 +520,24 @@ class HttpPortalSyncService implements PortalSyncInterface
                 $multipart[] = ['name' => 'age_group[]', 'contents' => $age];
             }
 
+            $updatedPaths = [];
+            $pathChanged = false;
+
             foreach ($event->photo_paths as $path) {
                 $fullPath = Storage::disk('public')->path($path);
+
+                if (!file_exists($fullPath)) {
+                    // Try fallback to the 'synced' directory
+                    if (!str_contains($path, 'events/synced/')) {
+                        $fallbackPath = str_replace('events/', 'events/synced/', $path);
+                        $fallbackFullPath = Storage::disk('public')->path($fallbackPath);
+                        if (file_exists($fallbackFullPath)) {
+                            $path = $fallbackPath;
+                            $fullPath = $fallbackFullPath;
+                            $pathChanged = true;
+                        }
+                    }
+                }
 
                 if (!file_exists($fullPath)) {
                     throw new PermanentSyncException(
@@ -524,6 +558,13 @@ class HttpPortalSyncService implements PortalSyncInterface
                     'contents' => $handle,
                     'filename' => basename($fullPath),
                 ];
+                $updatedPaths[] = $path;
+            }
+
+            // Save the updated paths if any fallback occurred
+            if ($pathChanged) {
+                $event->photo_paths = $updatedPaths;
+                $event->save();
             }
 
             // Jitter delay proportional to attempt count to spread out retry storms.
@@ -532,8 +573,7 @@ class HttpPortalSyncService implements PortalSyncInterface
 
             // Per-slot transmission lock — different slots can run simultaneously.
             try {
-                return Cache::lock($this->transmissionLockKey(), 60)->block(
-                    5,
+                return $this->runWithTransmissionLock(
                     function () use ($client, $multipart) {
                         $response = $client->post($this->submitUrl, ['multipart' => $multipart]);
                         return $this->evaluateResponse(
@@ -627,5 +667,43 @@ class HttpPortalSyncService implements PortalSyncInterface
         }
 
         return false;
+    }
+
+    /**
+     * Executes a callback within a shared transmission lock.
+     * Prevents overlapping submissions in the same slot across servers.
+     */
+    protected function runWithTransmissionLock(callable $callback)
+    {
+        $sharedPath = $this->getSharedPath("transmission_lock_slot_{$this->sessionSlot}.lock");
+        if ($sharedPath) {
+            $fp = @fopen($sharedPath, 'c+');
+            if ($fp) {
+                $startTime = microtime(true);
+                $locked = false;
+                while (microtime(true) - $startTime < 5.0) {
+                    if (@flock($fp, LOCK_EX | LOCK_NB)) {
+                        $locked = true;
+                        break;
+                    }
+                    usleep(50_000); // sleep 50ms
+                }
+
+                if (!$locked) {
+                    fclose($fp);
+                    throw new TransientSyncException("Timeout waiting for transmission lock for slot {$this->sessionSlot} (shared file lock)");
+                }
+
+                try {
+                    return $callback();
+                } finally {
+                    @flock($fp, LOCK_UN);
+                    fclose($fp);
+                }
+            }
+        }
+
+        // Fallback to standard Laravel Cache lock
+        return Cache::lock($this->transmissionLockKey(), 60)->block(5, $callback);
     }
 }

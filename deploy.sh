@@ -53,7 +53,10 @@ remote "echo 'SSH OK'" >/dev/null && ok "SSH connection established." || fail "C
 log "Step 2/10 — Pulling latest code from GitHub..."
 remote "cd $APP_DIR && git pull origin main 2>&1"
 remote "mkdir -p $APP_DIR/../public_html && cp $APP_DIR/public_html/nmba-cron.php $APP_DIR/../public_html/nmba-cron.php"
-ok "Code updated."
+sshpass -p "$SSH_PASS" scp -P "$SSH_PORT" -o StrictHostKeyChecking=no auto_sync_to_ctet.sh "$SSH_USER@$SSH_HOST:$APP_DIR/auto_sync_to_ctet.sh"
+sshpass -p "$SSH_PASS" scp -P "$SSH_PORT" -o StrictHostKeyChecking=no auto_sync_db.php "$SSH_USER@$SSH_HOST:$APP_DIR/auto_sync_db.php"
+remote "chmod +x $APP_DIR/auto_sync_to_ctet.sh"
+ok "Code updated and sync scripts uploaded."
 
 # STEP 3 — Install Composer production dependencies
 log "Step 3/10 — Installing Composer dependencies..."
@@ -92,15 +95,16 @@ ok "Failed jobs flushed. Queue workers will restart on next cron tick."
 log "Step 9/10 — Registering cron-based scheduler & queue worker..."
 CRON_CMD="*/5 * * * * $PHP $APP_DIR/artisan queue:work database --max-jobs=10 --tries=10 --timeout=110 >> $APP_DIR/storage/logs/cron-worker.log 2>&1"
 SCHEDULER_CMD="* * * * * $PHP $APP_DIR/artisan schedule:run >> /dev/null 2>&1"
+SYNC_CTET_CMD="* * * * * bash $APP_DIR/auto_sync_to_ctet.sh >> $APP_DIR/storage/logs/sync-ctet.log 2>&1"
 
 # Check if crontab utility is available (disabled on some shared hosts like Hostinger)
 HAS_CRONTAB=$(remote "command -v crontab >/dev/null 2>&1 && echo 'yes' || echo 'no'")
 
 if [ "$HAS_CRONTAB" = "yes" ]; then
     remote "
-      (crontab -l 2>/dev/null | grep -v 'nmbaagent' | grep -v 'queue:work'; echo '# NMBA Scheduler'; echo '$SCHEDULER_CMD'; echo '# NMBA Queue Worker'; echo '$CRON_CMD') | crontab -
+      (crontab -l 2>/dev/null | grep -v 'nmbaagent' | grep -v 'queue:work' | grep -v 'auto_sync_to_ctet'; echo '# NMBA Scheduler'; echo '$SCHEDULER_CMD'; echo '# NMBA Queue Worker'; echo '$CRON_CMD'; echo '# NMBA Sync to ctetmonktest.fun'; echo '$SYNC_CTET_CMD') | crontab -
     "
-    ok "Cron scheduler and queue worker registered in system crontab."
+    ok "Cron scheduler, queue worker, and sync script registered in system crontab."
 else
     # Extract the token dynamically from the remote .env to provide the exact URL
     REMOTE_TOKEN=$(remote "grep '^CRON_TOKEN=' $APP_DIR/.env | cut -d'=' -f2 | tr -d '\"'\'' '" 2>/dev/null || echo "")
@@ -113,8 +117,8 @@ else
     warn "     * * * * * $PHP $APP_DIR/artisan schedule:run >> /dev/null 2>&1"
     warn "  2. Web Cron Trigger 1 (every 5 mins):"
     warn "     */5 * * * * curl -s \"https://nmbabudgam.in/nmba-cron.php?token=$REMOTE_TOKEN\" > /dev/null 2>&1"
-    warn "  3. Web Cron Trigger 2 (every 5 mins, offset by 2 mins):"
-    warn "     2-57/5 * * * * curl -s \"https://nmbabudgam.in/nmba-cron.php?token=$REMOTE_TOKEN\" > /dev/null 2>&1"
+    warn "  3. Sync to CTET (every minute):"
+    warn "     * * * * * bash $APP_DIR/auto_sync_to_ctet.sh >> $APP_DIR/storage/logs/sync-ctet.log 2>&1"
 fi
 
 # STEP 10 — Final health check

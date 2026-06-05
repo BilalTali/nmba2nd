@@ -16,6 +16,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use App\Traits\SharedCacheTrait;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -38,7 +39,7 @@ use Illuminate\Support\Facades\Storage;
  */
 class SyncBatchJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels, SharedCacheTrait;
 
     /**
      * 10-minute timeout — covers 20 events × ~30s each with overhead.
@@ -48,12 +49,12 @@ class SyncBatchJob implements ShouldQueue
     /**
      * Queue-level retry attempts before Laravel marks the batch job as failed.
      */
-    public int $tries = 3;
+    public int $tries = 10;
 
     /**
      * Maximum exceptions before Laravel marks the job as failed.
      */
-    public int $maxExceptions = 3;
+    public int $maxExceptions = 10;
 
     /**
      * @param array $eventIds    IDs of up to 20 events this batch should process.
@@ -92,7 +93,7 @@ class SyncBatchJob implements ShouldQueue
         ]);
 
         // ── Guard: Circuit breaker check ──────────────────────────────────────
-        if (Cache::get('sre_circuit_breaker_portal_down') === true) {
+        if ($this->getSharedValue('sre_circuit_breaker_portal_down') === true) {
             Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.", [
                 'slot' => $this->sessionSlot,
             ]);
@@ -295,12 +296,12 @@ class SyncBatchJob implements ShouldQueue
      */
     protected function handleAuthFailureForBatch(string $errorMessage): void
     {
-        $failures = (int) Cache::get('sre_consecutive_auth_failures', 0) + 1;
-        Cache::put('sre_consecutive_auth_failures', $failures, now()->addDays(1));
+        $failures = (int) $this->getSharedValue('sre_consecutive_auth_failures', 0) + 1;
+        $this->setSharedValue('sre_consecutive_auth_failures', $failures, now()->addDays(1));
 
         if ($failures >= 3) {
-            Cache::put('auto_sync_paused', true);
-            Cache::put('portal_credentials_invalid', true);
+            $this->setSharedValue('auto_sync_paused', true, 86400 * 365);
+            $this->setSharedValue('portal_credentials_invalid', true, 86400 * 365);
 
             Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: AUTH FAILURE THRESHOLD REACHED. Auto-sync paused.", [
                 'slot'                 => $this->sessionSlot,

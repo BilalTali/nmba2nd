@@ -1,43 +1,39 @@
 <?php
 
 /**
- * NMBA Agent Portal — Secure Web Cron Trigger
+ * NMBA Agent Portal — Secure Web Cron Trigger (v2 — Live-Probe Edition)
  *
- * This endpoint is called by the Hostinger hPanel Cron Job manager
- * every 5 minutes via an HTTP GET request. It processes up to 10
- * pending queue jobs per invocation using the database driver in-memory.
+ * Called by hPanel Cron Job manager every minute via HTTP GET.
+ *
+ * NEW BEHAVIOUR (v2):
+ *   1. Probes the target portal DIRECTLY (live HTTP, 12s timeout) before any queue work.
+ *   2. If portal is dead → writes shared signal + returns immediately (saves the full 50s
+ *      queue:work window — no wasted CPU on a dead portal).
+ *   3. If portal is alive → writes cross-site live window signal to shared_sync/,
+ *      fires the peer site's cron endpoint asynchronously (non-blocking), then runs
+ *      schedule:run + queue:work.
+ *   4. After queue:work finishes → re-probes portal. If still alive AND jobs remain,
+ *      fires a loopback to self (same mechanism as before) to drain the queue.
  *
  * TOKEN SECURITY:
- *   The CRON_TOKEN value is loaded exclusively from the Laravel .env
- *   file — it is never stored in source code. To set up:
- *     1. Generate a new token: openssl rand -hex 32
- *     2. Add CRON_TOKEN=<generated_value> to your .env file
- *     3. Update the hPanel cron URL to use the new token value
- *   See README.md > "Deployment Secrets" for full instructions.
+ *   The CRON_TOKEN value is loaded exclusively from the Laravel .env file.
+ *   PEER_CRON_URL and PEER_CRON_TOKEN (for cross-site trigger) are also in .env.
  *
- * hPanel Command (template — replace TOKEN with actual value from .env):
+ * hPanel Command:
  *   curl -s "https://nmbabudgam.in/nmba-cron.php?token=TOKEN" > /dev/null 2>&1
  *
- * THROUGHPUT:
- *   --max-jobs=10 processes up to 10 jobs per 5-minute cycle (~120/hr burst).
- *   A second hPanel cron entry offset by 2 minutes doubles burst capacity to ~240/hr.
- *   See DEPLOYMENT.md for full throughput math and second-cron setup instructions.
- *
  * Server Layout:
- *   public_html/       <-- this file lives here (__DIR__)
- *   nmbaagent/         <-- Laravel app is SIBLING of public_html, NOT child
+ *   public_html/   ← this file lives here (__DIR__)
+ *   nmbaagent/     ← Laravel app is SIBLING of public_html
  */
 
-// Increase maximum execution time to 240 seconds to prevent early timeout
-@set_time_limit(240);
-
-// Prevent the webserver from killing the script when the loopback curl disconnects
+@set_time_limit(300);
 ignore_user_abort(true);
 
-// ── Load CRON_TOKEN securely from the Laravel .env file ─────────
+// ── Locate Laravel app root ───────────────────────────────────────────────────
 $possibleRoots = [
-    dirname(__DIR__) . '/nmbaagent', // Shared hosting sibling
-    dirname(__DIR__),                // Local/standard (public_html is inside Laravel root)
+    dirname(__DIR__) . '/nmbaagent', // Shared hosting sibling layout
+    dirname(__DIR__),                // Standard layout (public_html inside Laravel root)
 ];
 
 $appRoot = null;
@@ -55,54 +51,53 @@ if (!$appRoot) {
 
 define('APP_ROOT', $appRoot);
 define('LOG_FILE', APP_ROOT . '/storage/logs/cron-worker.log');
+define('SHARED_DIR', '/home/u335000182/shared_sync');
 
 /**
  * Minimal, safe .env key=value parser.
- * Reads only what it needs — does NOT eval or include the file.
  */
 function loadEnvValue(string $filePath, string $key): string
 {
     if (!file_exists($filePath) || !is_readable($filePath)) {
         return '';
     }
-
     $lines = file($filePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
         $line = trim($line);
-        // Skip comments and lines that don't start with KEY=
         if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) {
             continue;
         }
         [$lineKey, $lineValue] = explode('=', $line, 2);
         if (trim($lineKey) === $key) {
-            // Strip surrounding quotes if present
             return trim(trim($lineValue), '"\'');
         }
     }
     return '';
 }
 
-$envFile   = APP_ROOT . '/.env';
-$cronToken = loadEnvValue($envFile, 'CRON_TOKEN');
+$envFile      = APP_ROOT . '/.env';
+$cronToken    = loadEnvValue($envFile, 'CRON_TOKEN');
+$portalUrl    = rtrim(loadEnvValue($envFile, 'PORTAL_URL'), '/') . '/login';
+$peerCronUrl  = loadEnvValue($envFile, 'PEER_CRON_URL');
+$peerCronToken = loadEnvValue($envFile, 'PEER_CRON_TOKEN');
 
-// ── Fail secure: reject if token is not configured in .env ───────
+// ── Fail secure: token check ──────────────────────────────────────────────────
 if (empty($cronToken)) {
     http_response_code(500);
-    die('[' . date('Y-m-d H:i:s') . '] ERROR: CRON_TOKEN is not set in .env. Cron execution blocked.');
+    die('[' . date('Y-m-d H:i:s') . '] ERROR: CRON_TOKEN not set in .env.');
 }
 
-// ── Security: reject requests without the correct token ─────────
 $requestToken = $_GET['token'] ?? '';
 if (!hash_equals($cronToken, $requestToken)) {
     http_response_code(403);
     die('Forbidden');
 }
 
-// ── Guard: prevent overlapping cron runs using a lockfile ────────
-$lockFile = sys_get_temp_dir() . '/nmba_queue_worker.lock';
+// ── Lockfile: prevent overlapping cron runs ───────────────────────────────────
+$lockFile = sys_get_temp_dir() . '/nmba_queue_worker_' . md5(APP_ROOT) . '.lock';
 if (file_exists($lockFile)) {
     $lockAge = time() - filemtime($lockFile);
-    if ($lockAge < 300) { // Lock expires after 5 minutes
+    if ($lockAge < 300) {
         http_response_code(200);
         die('[' . date('Y-m-d H:i:s') . '] Worker already running (lock age: ' . $lockAge . 's)');
     }
@@ -110,14 +105,138 @@ if (file_exists($lockFile)) {
 touch($lockFile);
 
 $lockReleased = false;
-register_shutdown_function(function() use ($lockFile, &$lockReleased) {
+register_shutdown_function(function () use ($lockFile, &$lockReleased) {
     if (!$lockReleased) {
         @unlink($lockFile);
     }
 });
 
+// ── Helper: write cross-site portal live window ───────────────────────────────
+function writePortalLiveWindow(): void
+{
+    if (!is_dir(SHARED_DIR) || !is_writable(SHARED_DIR)) {
+        return;
+    }
+    file_put_contents(
+        SHARED_DIR . '/portal_live_window.json',
+        json_encode(['probed_at' => time(), 'site' => $_SERVER['HTTP_HOST'] ?? 'cron'])
+    );
+}
+
+function forgetPortalLiveWindow(): void
+{
+    $f = SHARED_DIR . '/portal_live_window.json';
+    if (file_exists($f)) {
+        @unlink($f);
+    }
+}
+
+function readPortalLiveWindowAge(): ?int
+{
+    $f = SHARED_DIR . '/portal_live_window.json';
+    if (!file_exists($f)) {
+        return null;
+    }
+    $d = json_decode(file_get_contents($f), true);
+    if (!isset($d['probed_at'])) {
+        return null;
+    }
+    return time() - (int) $d['probed_at'];
+}
+
+// ── Helper: fire an async HTTP request (fire-and-forget) ──────────────────────
+function fireAsync(string $url): void
+{
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 1);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_exec($ch);
+    // curl_close() deprecated since PHP 8.4; handle freed automatically.
+}
+
+// ── STEP 1: Direct portal probe (bypasses all Laravel cache) ─────────────────
+//
+// We probe the portal HERE, in plain PHP, before bootstrapping Laravel.
+// This is the fastest possible check: if the portal is dead, we return
+// immediately without spending any time on schedule:run or queue:work.
+//
+// Exception: if another site wrote a fresh portal_live_window in the last 15s,
+// we trust that result and skip our own probe entirely.
+
+$portalIsAlive = false;
+$probedDirectly = false;
+
+$liveWindowAge = readPortalLiveWindowAge();
+if ($liveWindowAge !== null && $liveWindowAge < 15) {
+    // Cross-site signal: another site confirmed alive very recently
+    $portalIsAlive = true;
+    $probedDirectly = false;
+    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: cross-site live window hit (age ' . $liveWindowAge . 's) — skipping own probe.' . PHP_EOL, FILE_APPEND);
+} else {
+    // Probe directly — 12s timeout, no cache
+    $probedDirectly = true;
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $portalUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0');
+    $probeBody   = curl_exec($ch);
+    $probeStatus = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $probeTime   = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+    // curl_close() deprecated since PHP 8.4.
+
+    $hasUsername = $probeBody && (
+        str_contains($probeBody, 'name="username"') ||
+        str_contains($probeBody, 'name="email"')
+    );
+    $hasPassword = $probeBody && str_contains($probeBody, 'type="password"');
+
+    $portalIsAlive = ($probeStatus === 200 && $hasUsername && $hasPassword);
+
+    $probeResult = $portalIsAlive ? 'ALIVE' : 'DEAD';
+    file_put_contents(
+        LOG_FILE,
+        '[' . date('Y-m-d H:i:s') . "] Cron pre-probe: {$probeResult} (HTTP {$probeStatus}, {$probeTime}s, username={$hasUsername}, password={$hasPassword})" . PHP_EOL,
+        FILE_APPEND
+    );
+}
+
+if (!$portalIsAlive) {
+    // Portal is dead — write the signal so the scheduler doesn't waste time probing
+    forgetPortalLiveWindow();
+
+    $lockReleased = true;
+    @unlink($lockFile);
+
+    http_response_code(200);
+    header('Content-Type: text/plain');
+    echo '[' . date('Y-m-d H:i:s') . '] Portal probe: DEAD — skipping queue work.' . PHP_EOL;
+    exit;
+}
+
+// ── STEP 2: Portal is ALIVE — write cross-site signal + fire peer ─────────────
+writePortalLiveWindow();
+
+// Fire the peer site's cron immediately (non-blocking, 1s timeout).
+// This ensures the other deployment also starts syncing RIGHT NOW during this live window.
+if (!empty($peerCronUrl) && !empty($peerCronToken)) {
+    $peerUrl = $peerCronUrl . '?token=' . urlencode($peerCronToken);
+    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: firing peer site async: ' . $peerCronUrl . PHP_EOL, FILE_APPEND);
+    fireAsync($peerUrl);
+}
+
+// ── STEP 3: Bootstrap Laravel + run scheduler + queue worker ──────────────────
 try {
-    // ── Bootstrap Laravel Internally ─────────────────────────────────
     if (!file_exists(APP_ROOT . '/vendor/autoload.php')) {
         throw new \Exception('Composer autoload not found. Run composer install first.');
     }
@@ -132,43 +251,32 @@ try {
     $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
     $kernel->bootstrap();
 
-    // Check if circuit breaker is active before running queue worker
-    if (\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') === true) {
-        // @unlink($lockFile); // Handled by shutdown function
-        http_response_code(200);
-        header('Content-Type: text/plain');
-        die('[' . date('Y-m-d H:i:s') . '] Circuit breaker active. Queue worker execution deferred.' . PHP_EOL);
-    }
+    // Check circuit breaker — but since we just probed alive, clear it
+    \Illuminate\Support\Facades\Cache::forget('sre_circuit_breaker_portal_down');
+    \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 360);
 
-    // First, run Laravel schedule:run internally to process scheduled tasks and dispatch batch jobs
+    // Run schedule:run (dispatches SyncBatchJobs for all pending events)
     $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
-    $scheduleInput = new \Symfony\Component\Console\Input\StringInput('schedule:run');
+    $scheduleInput  = new \Symfony\Component\Console\Input\StringInput('schedule:run');
     $kernel->handle($scheduleInput, $scheduleOutput);
     $scheduleText = $scheduleOutput->fetch();
 
     if (!empty(trim($scheduleText))) {
-        $logEntry = '[' . date('Y-m-d H:i:s') . '] Scheduler Output:' . PHP_EOL . $scheduleText . PHP_EOL;
-        file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Scheduler Output:' . PHP_EOL . $scheduleText . PHP_EOL, FILE_APPEND);
     }
 
-    // Capture output of the Artisan command run
+    // Run queue:work for up to 50 seconds — processes the dispatched SyncBatchJobs
     $output = new \Symfony\Component\Console\Output\BufferedOutput();
-    // Process as many jobs as possible for 50 seconds, then exit cleanly to allow loopback
-    $input = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=50 --tries=10 --timeout=110 --stop-when-empty');
-
-    // Run the queue worker command internally in the current PHP process SAPI context
-    $exitCode = $kernel->handle($input, $output);
+    $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty');
+    $exitCode   = $kernel->handle($input, $output);
     $outputText = $output->fetch();
 
-    // Log the output to cron-worker.log
-    $logEntry = '[' . date('Y-m-d H:i:s') . '] Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL;
-    file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
+    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL, FILE_APPEND);
 
-    // Release lock before checking for remaining jobs and loopbacking
+    // ── STEP 4: Post-work — re-probe + loopback if more jobs remain ──────────
     $lockReleased = true;
     @unlink($lockFile);
 
-    // Check if there are still ready jobs in the queue
     try {
         $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
             ->where('queue', 'default')
@@ -176,42 +284,57 @@ try {
             ->where('available_at', '<=', time())
             ->count();
 
-        $host = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
+        $host        = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
         $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
 
-        if ($remainingJobs > 0 && !$isLocalhost && \Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') !== true) {
-            // Trigger next batch asynchronously via loopback call
-            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-            $selfUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken);
+        if ($remainingJobs > 0 && !$isLocalhost) {
+            // Quick re-probe before loopback (2s timeout, reuse live window if fresh)
+            $liveWindowAge = readPortalLiveWindowAge();
+            $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 15);
 
-            $logEntry = '[' . date('Y-m-d H:i:s') . "] Spawning next batch async loopback: {$remainingJobs} jobs remaining.\n";
-            file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
+            if (!$stillAlive) {
+                // Quick direct probe
+                $ch2 = curl_init();
+                curl_setopt($ch2, CURLOPT_URL, $portalUrl);
+                curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch2, CURLOPT_TIMEOUT, 6);
+                curl_setopt($ch2, CURLOPT_NOSIGNAL, 1);
+                curl_setopt($ch2, CURLOPT_SSL_VERIFYPEER, false);
+                curl_setopt($ch2, CURLOPT_SSL_VERIFYHOST, false);
+                curl_setopt($ch2, CURLOPT_FOLLOWLOCATION, true);
+                curl_setopt($ch2, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+                $recheckBody   = curl_exec($ch2);
+                $recheckStatus = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+                $stillAlive    = ($recheckStatus === 200 &&
+                    ($recheckBody && str_contains($recheckBody, 'type="password"')));
+                if ($stillAlive) {
+                    writePortalLiveWindow();
+                } else {
+                    forgetPortalLiveWindow();
+                }
+            }
 
-            // Trigger curl asynchronously with 1-second timeout
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $selfUrl);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 1);
-            curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-            curl_exec($ch);
-            curl_close($ch);
+            if ($stillAlive && !\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down')) {
+                $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                $selfUrl  = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken);
+
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Spawning loopback: {$remainingJobs} jobs remain, portal still alive." . PHP_EOL, FILE_APPEND);
+                fireAsync($selfUrl);
+            } else {
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Portal went dead after queue:work — no loopback.' . PHP_EOL, FILE_APPEND);
+            }
         }
     } catch (\Throwable $dbEx) {
-        $logEntry = '[' . date('Y-m-d H:i:s') . '] Loopback trigger failed: ' . $dbEx->getMessage() . PHP_EOL;
-        file_put_contents(LOG_FILE, $logEntry, FILE_APPEND);
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Loopback check failed: ' . $dbEx->getMessage() . PHP_EOL, FILE_APPEND);
     }
 
-    // Respond with confirmation
     http_response_code(200);
     header('Content-Type: text/plain');
-    echo '[' . date('Y-m-d H:i:s') . '] Queue worker cycle completed (max-jobs=10).' . PHP_EOL;
+    echo '[' . date('Y-m-d H:i:s') . '] Queue worker cycle completed.' . PHP_EOL;
     echo $outputText;
 
 } catch (\Throwable $e) {
-    // @unlink($lockFile); // Handled by shutdown function
     http_response_code(500);
     header('Content-Type: text/plain');
-    die('ERROR bootstrapping or executing queue: ' . $e->getMessage() . PHP_EOL . $e->getTraceAsString());
+    die('ERROR: ' . $e->getMessage() . PHP_EOL . $e->getTraceAsString());
 }

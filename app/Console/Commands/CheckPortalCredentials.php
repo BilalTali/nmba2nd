@@ -35,7 +35,7 @@ class CheckPortalCredentials extends Command
         if (empty($url) || empty($email) || empty($password)) {
             $this->error('PORTAL_URL, PORTAL_EMAIL, or PORTAL_PASSWORD is missing from .env');
             $this->writeLog('ERROR', 'Missing credentials in .env — test skipped.');
-            return Command::FAILURE;
+            return self::FAILURE;
         }
 
         $loginUrl = $url . '/login';
@@ -52,6 +52,9 @@ class CheckPortalCredentials extends Command
                 'allow_redirects' => ['max' => 10, 'strict' => false],
                 'headers'         => [
                     'User-Agent' => 'Mozilla/5.0 (NMBA-CredentialCheck/1.0)',
+                ],
+                'curl'            => [
+                    CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
                 ],
             ]);
 
@@ -88,20 +91,20 @@ class CheckPortalCredentials extends Command
                 if (!$this->option('quiet-on-success')) {
                     $this->info("✓ {$message}");
                 }
-                return Command::SUCCESS;
+                return self::SUCCESS;
             }
 
             // Authentication did not produce an authenticated session
             $message = "FAILURE — Portal rejected credentials. ({$email}) — Portal may have changed or password is wrong.";
             $this->writeLog('FAILURE', $message);
             $this->error("✗ {$message}");
-            return Command::FAILURE;
+            return self::FAILURE;
 
         } catch (\Exception $e) {
             $message = "ERROR — Could not reach portal: {$e->getMessage()}";
             $this->writeLog('ERROR', $message);
             $this->error("✗ {$message}");
-            return Command::FAILURE;
+            return self::FAILURE;
         }
     }
 
