@@ -70,6 +70,28 @@ class Kernel extends ConsoleKernel
             //   - On failure: trips circuit breaker (8s TTL, not 60s)
             if (!$healthService->isAlive()) {
                 Log::channel('sync')->warning('Scheduler halted — portal health probe failed. Circuit breaker tripped (8s cooldown).');
+                
+                // If it wasn't already marked offline, perform a clean sweep of the queue
+                if (!$this->getSharedValue('sre_last_portal_was_offline', false)) {
+                    Log::channel('sync')->info('Scheduler: Portal transitioned to OFFLINE. Sweeping queue and resetting event statuses.');
+                    try {
+                        \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'default')->delete();
+                        Event::where('sync_status', 'syncing')
+                            ->update([
+                                'sync_status' => 'pending',
+                                'last_attempt_at' => now(),
+                            ]);
+                        Event::where('sync_status', 'pending')
+                            ->chunk(100, function ($pendingEvents) {
+                                foreach ($pendingEvents as $pe) {
+                                    \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$pe->id}");
+                                }
+                            });
+                    } catch (\Throwable $e) {
+                        Log::channel('sync')->warning('Scheduler: offline sweep failed: ' . $e->getMessage());
+                    }
+                }
+
                 $this->setSharedValue('sre_last_portal_was_offline', true, 7200);
                 return;
             }
