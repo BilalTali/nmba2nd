@@ -708,6 +708,16 @@ class EventController extends Controller
                 Log::channel('sync')->warning('Could not clear dispatch locks on portal recovery: ' . $e->getMessage());
             }
 
+            // 1b. Clear WithoutOverlapping slot locks to enable immediate parallel execution.
+            try {
+                for ($i = 0; $i < 8; $i++) {
+                    Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                }
+                Log::channel('sync')->info('Outage recovery: WithoutOverlapping slot locks cleared.');
+            } catch (\Throwable $e) {
+                Log::channel('sync')->warning('Could not clear slot locks on portal recovery: ' . $e->getMessage());
+            }
+
             // 2. Reset all delayed jobs to available_at = now() so the queue worker picks them up.
             try {
                 if (config('queue.default') === 'database' && \Illuminate\Support\Facades\Schema::hasTable('jobs')) {
