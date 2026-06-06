@@ -87,6 +87,11 @@ class Kernel extends ConsoleKernel
                                     Cache::forget("sre_sync_dispatch_lock_{$pe->id}");
                                 }
                             });
+
+                        // Clear WithoutOverlapping slot locks to allow fresh start
+                        for ($i = 0; $i < 8; $i++) {
+                            Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                        }
                     } catch (\Throwable $e) {
                         Log::channel('sync')->warning('Scheduler: offline sweep failed: ' . $e->getMessage());
                     }
@@ -127,7 +132,7 @@ class Kernel extends ConsoleKernel
             //   2. Queue jobs with far-future available_at (from release($delaySeconds))
             if ($this->getSharedValue('sre_last_portal_was_offline', false)) {
                 $this->forgetSharedValue('sre_last_portal_was_offline');
-                Log::channel('sync')->info('Scheduler: portal recovery detected — clearing dispatch locks and resetting delayed jobs.');
+                Log::channel('sync')->info('Scheduler: portal recovery detected — clearing dispatch locks, slot locks and resetting delayed jobs.');
 
                 // 1. Clear per-event dispatch locks
                 try {
@@ -142,7 +147,16 @@ class Kernel extends ConsoleKernel
                     Log::channel('sync')->warning('Scheduler recovery: could not clear dispatch locks: ' . $e->getMessage());
                 }
 
-                // 2. Reset all delayed queue jobs to immediately available
+                // 2. Clear WithoutOverlapping slot locks to enable immediate parallel execution
+                try {
+                    for ($i = 0; $i < 8; $i++) {
+                        Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                    }
+                } catch (\Throwable $e) {
+                    Log::channel('sync')->warning('Scheduler recovery: could not clear slot locks: ' . $e->getMessage());
+                }
+
+                // 3. Reset all delayed queue jobs to immediately available
                 try {
                     if (\Illuminate\Support\Facades\Schema::hasTable('jobs')) {
                         $resetCount = \Illuminate\Support\Facades\DB::table('jobs')

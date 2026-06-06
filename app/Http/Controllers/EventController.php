@@ -599,6 +599,11 @@ class EventController extends Controller
             $this->forgetSharedValue('sre_consecutive_auth_failures');
             $this->forgetSharedValue('portal_credentials_invalid');
 
+            // Clear WithoutOverlapping slot locks to allow fresh start
+            for ($i = 0; $i < 8; $i++) {
+                Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+            }
+
             // Force dashboard metrics to refresh
             Cache::forget('dashboard_metrics_counts');
 
