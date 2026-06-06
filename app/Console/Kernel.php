@@ -239,7 +239,14 @@ class Kernel extends ConsoleKernel
             'candidate_count' => $dispatchable->count(),
         ]);
 
-        $maxSlots  = (int) config('services.sync.max_slots', 8);
+        try {
+            $maxSlots = app(PortalHealthService::class)->getRecommendedSlotLimit();
+        } catch (\Throwable $e) {
+            $maxSlots = (int) config('services.sync.max_slots', 8);
+        }
+        if (!$maxSlots) {
+            $maxSlots = (int) config('services.sync.max_slots', 8);
+        }
         $slotIndex = 0;
         $dispatched = 0;
 

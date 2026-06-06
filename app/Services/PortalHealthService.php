@@ -113,7 +113,7 @@ class PortalHealthService
         try {
             $response = $client->get($this->loginUrl);
             $this->lastResponseTime = microtime(true) - $startTime;
-            Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
+            $this->setSharedValue('sre_portal_response_time', $this->lastResponseTime, 600);
 
             if ($response->getStatusCode() !== 200) {
                 $this->forgetPortalLiveWindow();
@@ -149,6 +149,7 @@ class PortalHealthService
 
             // Cache alive state locally
             $this->setSharedValue('sre_portal_is_alive', true, $this->aliveTtl);
+            $this->forgetSharedValue('sre_consecutive_portal_failures');
 
             // Clear any stale circuit breaker (bypassCache=true recovery path)
             if ($bypassCache) {
@@ -160,7 +161,7 @@ class PortalHealthService
         } catch (Exception $e) {
             $this->forgetPortalLiveWindow();
             $this->lastResponseTime = microtime(true) - $startTime;
-            Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
+            $this->setSharedValue('sre_portal_response_time', $this->lastResponseTime, 600);
             if (!$bypassCache) {
                 $this->tripCircuitBreaker($e->getMessage());
             }
@@ -170,13 +171,20 @@ class PortalHealthService
 
     /**
      * Activate the circuit breaker and emit an alert log entry.
-     * TTL reduced from 60s → 8s: retry aggressively since portal flickers.
+     * Uses dynamic exponential backoff based on consecutive failures.
      */
     public function tripCircuitBreaker(string $reason): void
     {
+        $failures = (int) $this->getSharedValue('sre_consecutive_portal_failures', 0) + 1;
+        $this->setSharedValue('sre_consecutive_portal_failures', $failures, 3600);
+
+        // Progressive backoff: 8s, 16s, 32s, max 60s
+        $backoffTtl = min(60, 8 * (2 ** ($failures - 1)));
+
         Log::channel('sync')->alert('Circuit breaker tripped — portal unreachable.', [
-            'reason'   => $reason,
-            'cooldown' => $this->breakerTtl . ' seconds',
+            'reason'               => $reason,
+            'consecutive_failures' => $failures,
+            'cooldown'             => $backoffTtl . ' seconds',
         ]);
 
         $this->forgetSharedValue('sre_portal_is_alive');
@@ -185,7 +193,7 @@ class PortalHealthService
         // It is only authoritative when deleted by a direct probe that found the portal dead.
         // Deleting it here (on a transient 522 from a sync job session check) would destroy
         // the dashboard's fallback signal unnecessarily during brief circuit breaker cycles.
-        $this->setSharedValue('sre_circuit_breaker_portal_down', true, $this->breakerTtl);
+        $this->setSharedValue('sre_circuit_breaker_portal_down', true, $backoffTtl);
 
         // DEGRADED STATE FIX: set a longer-lived signal so the dashboard can display
         // "Degraded" for 2 minutes after the circuit breaker trips.
@@ -195,4 +203,29 @@ class PortalHealthService
         $this->setSharedValue('sre_portal_is_degraded', true, 120);
     }
 
+    /**
+     * Determine the recommended number of parallel slots based on portal response time and health.
+     */
+    public function getRecommendedSlotLimit(): int
+    {
+        $maxSlots = (int) config('services.sync.max_slots', 8);
+
+        // 1. If portal is degraded, scale down significantly to allow recovery
+        if ($this->getSharedValue('sre_portal_is_degraded') === true) {
+            return min(2, $maxSlots);
+        }
+
+        // 2. Read the latest response time (default to 3.0s if not set)
+        $responseTime = (float) $this->getSharedValue('sre_portal_response_time', 3.0);
+
+        if ($responseTime > 15.0) {
+            return min(2, $maxSlots); // very slow/struggling
+        } elseif ($responseTime > 8.0) {
+            return min(3, $maxSlots); // slow
+        } elseif ($responseTime > 4.0) {
+            return min(5, $maxSlots); // moderate
+        }
+
+        return $maxSlots; // healthy
+    }
 }

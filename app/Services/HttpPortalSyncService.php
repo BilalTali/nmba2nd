@@ -147,19 +147,15 @@ class HttpPortalSyncService implements PortalSyncInterface
     {
         // Fetch the last known response time of the portal.
         // Default 55s — the portal is observed to take 47-50s under load.
-        $lastResponseTime = (float) Cache::get('sre_portal_response_time', 55.0);
+        $lastResponseTime = (float) $this->getSharedValue('sre_portal_response_time', 55.0);
 
-        // BN-2 FIX: Floor reduced 55 → 35s.
-        // Rationale: as the portal stabilises and sre_portal_response_time
-        // reflects real observed times, this allows the calculated timeout to
-        // shrink proportionally instead of being artificially floored at 120s.
-        $effectiveResponseTime = max(35.0, $lastResponseTime);
+        // Floor reduced to 15s to allow fast timeout scaling when the portal is responsive.
+        $effectiveResponseTime = max(15.0, $lastResponseTime);
 
-        // Dynamic timeout: response time × 3, clamped to [105s, 150s].
-        // 105s floor: gives a 70s margin above a 35s baseline response.
-        // 150s ceiling: prevents a single request holding up the job too long.
+        // Dynamic timeout: response time × 3, clamped to [45s, 150s].
+        // 45s floor: gives a 30s margin above a 15s baseline response.
         $calculatedTimeout = (int) ceil($effectiveResponseTime * 3);
-        $timeout = max(105, min(150, $calculatedTimeout));
+        $timeout = max(45, min(150, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,

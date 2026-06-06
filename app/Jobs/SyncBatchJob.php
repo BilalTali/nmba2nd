@@ -207,6 +207,11 @@ class SyncBatchJob implements ShouldQueue
                     // Clear dispatch lock on success
                     Cache::forget("sre_sync_dispatch_lock_{$eventId}");
                     Cache::forget('sre_consecutive_auth_failures');
+                    $this->forgetSharedValue('sre_consecutive_portal_failures');
+
+                    // Update response time in shared cache
+                    $durationSeconds = $durationMs / 1000.0;
+                    $this->setSharedValue('sre_portal_response_time', $durationSeconds, 600);
 
                     // Audit log
                     $this->writeSyncLog($event, 'success', null, null);

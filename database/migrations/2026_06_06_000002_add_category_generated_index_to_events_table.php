@@ -35,6 +35,14 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::getDriverName() === 'sqlite') {
+            Schema::table('events', function (Blueprint $table) {
+                $table->string('event_category_first', 120)->nullable();
+                $table->index('event_category_first', 'idx_events_category_first');
+            });
+            return;
+        }
+
         // Use raw SQL: Blueprint does not natively support GENERATED columns.
         DB::statement("
             ALTER TABLE events
@@ -51,6 +59,14 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (DB::getDriverName() === 'sqlite') {
+            Schema::table('events', function (Blueprint $table) {
+                $table->dropIndex('idx_events_category_first');
+                $table->dropColumn('event_category_first');
+            });
+            return;
+        }
+
         Schema::table('events', function (Blueprint $table) {
             $table->dropIndex('idx_events_category_first');
         });

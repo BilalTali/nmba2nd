@@ -198,7 +198,7 @@ class SyncManagementController extends Controller
             $this->runQueueWorkerInBackground();
 
             return redirect()->route('dashboard')
-                ->with('success', "Reset {$updatedCount} failed/quarantined events to pending. Background daemon will process them shortly.");
+                ->with('success', "Successfully reset {$updatedCount} failed or quarantined events back to pending. The background sync daemon will process them shortly.");
         } catch (Exception $e) {
             return redirect()->route('dashboard')
                 ->withErrors(['error' => 'Reset failed: ' . $e->getMessage()]);
