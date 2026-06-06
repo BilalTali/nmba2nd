@@ -198,7 +198,7 @@ class Kernel extends ConsoleKernel
             'candidate_count' => $dispatchable->count(),
         ]);
 
-        $maxSlots  = (int) env('SYNC_MAX_SLOTS', 8);
+        $maxSlots  = (int) config('services.sync.max_slots', 8);
         $slotIndex = 0;
         $dispatched = 0;
 

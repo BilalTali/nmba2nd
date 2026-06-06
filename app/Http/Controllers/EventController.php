@@ -78,7 +78,7 @@ class EventController extends Controller
 
                 if (!$isLocalhost) {
                     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                    $cronUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode(env('CRON_TOKEN', ''));
+                    $cronUrl = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode(config('services.cron.token', ''));
                     
                     $ch = curl_init();
                     curl_setopt($ch, CURLOPT_URL, $cronUrl);

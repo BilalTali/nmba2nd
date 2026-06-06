@@ -45,4 +45,8 @@ return [
         'token' => env('CRON_TOKEN'),
     ],
 
+    'sync' => [
+        'max_slots' => (int) env('SYNC_MAX_SLOTS', 8),
+    ],
+
 ];
