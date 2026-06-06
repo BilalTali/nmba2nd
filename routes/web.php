@@ -51,7 +51,7 @@ Route::middleware(['auth', 'district_access'])->group(function () {
 });
 
 Route::middleware(['auth', 'admin'])->group(function () {
-    Route::get('/dashboard', [\App\Http\Controllers\EventController::class, 'dashboard'])->name('dashboard');
+    Route::get('/dashboard', [\App\Http\Controllers\DashboardController::class, 'dashboard'])->name('dashboard');
     Route::get('/admin/synced-events', [\App\Http\Controllers\EventController::class, 'syncedEventsIndex'])->name('admin.synced-events');
     Route::get('/admin/events/pdf', [\App\Http\Controllers\EventController::class, 'exportPdf'])->name('admin.events.pdf');
     Route::get('/admin/events-portal', function (\Illuminate\Http\Request $request) {
@@ -282,34 +282,35 @@ Route::middleware(['auth', 'admin'])->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
     
     // Admin routes — rate limited to prevent self-inflicted DoS
-    Route::post('/events/{event}/toggle-sync', [\App\Http\Controllers\EventController::class, 'toggleSyncStatus'])
+    // Sync management — write operations (SyncManagementController)
+    Route::post('/events/{event}/toggle-sync', [\App\Http\Controllers\SyncManagementController::class, 'toggleSyncStatus'])
         ->middleware('throttle:15,1')->name('events.toggleSync');
-    Route::post('/events/{event}/retry-sync', [\App\Http\Controllers\EventController::class, 'retrySync'])
+    Route::post('/events/{event}/retry-sync', [\App\Http\Controllers\SyncManagementController::class, 'retrySync'])
         ->middleware('throttle:5,1')->name('events.retrySync');
-    Route::post('/events/toggle-auto-sync', [\App\Http\Controllers\EventController::class, 'toggleAutoSync'])
+    Route::post('/events/toggle-auto-sync', [\App\Http\Controllers\SyncManagementController::class, 'toggleAutoSync'])
         ->middleware('throttle:10,1')->name('events.toggleAutoSync');
-    Route::post('/events/force-sync', [\App\Http\Controllers\EventController::class, 'forceSync'])
+    Route::post('/events/force-sync', [\App\Http\Controllers\SyncManagementController::class, 'forceSync'])
         ->name('events.force-sync');
-    Route::post('/events/run-queue-worker', [\App\Http\Controllers\EventController::class, 'runQueueWorkerManually'])
+    Route::post('/events/run-queue-worker', [\App\Http\Controllers\SyncManagementController::class, 'runQueueWorkerManually'])
         ->name('events.run-queue-worker');
-    Route::post('/events/clear-queue', [\App\Http\Controllers\EventController::class, 'clearQueueManually'])
+    Route::post('/events/clear-queue', [\App\Http\Controllers\SyncManagementController::class, 'clearQueueManually'])
         ->name('events.clear-queue');
-    Route::post('/events/reset-failed', [\App\Http\Controllers\EventController::class, 'resetFailedSyncs'])
+    Route::post('/events/reset-failed', [\App\Http\Controllers\SyncManagementController::class, 'resetFailedSyncs'])
         ->name('events.reset-failed');
-    Route::post('/events/purge-synced-media', [\App\Http\Controllers\EventController::class, 'purgeSyncedMedia'])
+    Route::post('/events/purge-synced-media', [\App\Http\Controllers\SyncManagementController::class, 'purgeSyncedMedia'])
         ->middleware('throttle:30,1')->name('events.purge-media');
     // Polled every 15s — allow max 60/min per user to support multiple tabs without 429 errors
-    Route::get('/events/check-portal', [\App\Http\Controllers\EventController::class, 'checkPortalHealth'])
+    Route::get('/events/check-portal', [\App\Http\Controllers\DashboardController::class, 'checkPortalHealth'])
         ->middleware('throttle:60,1')->name('events.check-portal');
 
-    // Setting env route
+    // Credentials
     Route::post('/settings/env', [\App\Http\Controllers\SettingsController::class, 'updateEnv'])
         ->middleware('throttle:10,1')->name('settings.env');
 
-    // Diagnostic Logs
-    Route::get('/admin/logs/sync', [\App\Http\Controllers\EventController::class, 'viewSyncLogs'])
+    // Diagnostic Logs (DashboardController)
+    Route::get('/admin/logs/sync', [\App\Http\Controllers\DashboardController::class, 'viewSyncLogs'])
         ->name('admin.logs.sync');
-    Route::get('/admin/logs/audit', [\App\Http\Controllers\EventController::class, 'viewAuditLogs'])
+    Route::get('/admin/logs/audit', [\App\Http\Controllers\DashboardController::class, 'viewAuditLogs'])
         ->name('admin.logs.audit');
 });
 

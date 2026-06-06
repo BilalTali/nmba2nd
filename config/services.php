@@ -36,9 +36,12 @@ return [
     ],
 
     'portal' => [
-        'url' => env('PORTAL_URL'),
-        'email' => env('PORTAL_EMAIL'),
-        'password' => env('PORTAL_PASSWORD'),
+        'url'              => env('PORTAL_URL'),
+        'email'            => env('PORTAL_EMAIL'),
+        'password'         => env('PORTAL_PASSWORD'),
+        // Comma-separated keywords that indicate a successful portal submission.
+        // Override PORTAL_SUCCESS_KEYWORDS in .env if the portal UI text changes.
+        'success_keywords' => env('PORTAL_SUCCESS_KEYWORDS', 'success,saved successfully,record added,created successfully,activity logged,data saved'),
     ],
 
     'cron' => [

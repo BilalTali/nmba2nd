@@ -787,9 +787,10 @@ class HttpPortalSyncService implements PortalSyncInterface
             return true;
         }
 
-        // HTTP 200: scan for known success keywords.
+        // HTTP 200: scan for known success keywords (configurable via PORTAL_SUCCESS_KEYWORDS in .env).
         if ($statusCode === 200) {
-            $successKeywords = ['success', 'saved successfully', 'record added', 'created successfully', 'activity logged'];
+            $rawKeywords     = config('services.portal.success_keywords', 'success,saved successfully,record added,created successfully,activity logged');
+            $successKeywords = array_map('trim', explode(',', strtolower($rawKeywords)));
             foreach ($successKeywords as $keyword) {
                 if (str_contains($lower, $keyword)) {
                     return true;

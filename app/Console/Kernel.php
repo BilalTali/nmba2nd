@@ -198,7 +198,7 @@ class Kernel extends ConsoleKernel
      *
      * Returns the number of batch jobs dispatched.
      */
-    protected function dispatchPendingBatches(): int
+    public function dispatchPendingBatches(): int
     {
         // BN-6 FIX: Select only the columns required for dispatch-eligibility
         // checks. Avoids loading 30+ columns × 1,000 rows = unnecessary memory.
