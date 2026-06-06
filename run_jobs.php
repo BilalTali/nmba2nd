@@ -59,6 +59,15 @@ Cache::forget('sre_last_portal_was_offline');
 Cache::forget('auto_sync_paused');
 Cache::forget('sre_consecutive_auth_failures');
 Cache::forget('portal_credentials_invalid');
+
+$sharedDir = '/home/u335000182/shared_sync';
+if (is_dir($sharedDir)) {
+    @unlink($sharedDir . '/sre_circuit_breaker_portal_down.json');
+    @unlink($sharedDir . '/sre_last_portal_was_offline.json');
+    @unlink($sharedDir . '/auto_sync_paused.json');
+    @unlink($sharedDir . '/sre_consecutive_auth_failures.json');
+    @unlink($sharedDir . '/portal_credentials_invalid.json');
+}
 ok('Circuit breaker reset — syncing unblocked.');
 line();
 

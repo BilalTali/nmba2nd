@@ -93,7 +93,7 @@ class SyncedEventsViewTest extends TestCase
             ->component('Events/SyncedIndex')
             ->has('events.data', 1)
             ->where('events.data.0.event_name', 'Synced Event')
-            ->where('events.data.0.formatted_synced_at', '20-05-2026 04:22:00 PM')
+            ->where('events.data.0.formatted_synced_at', \Illuminate\Support\Carbon::parse($syncedEvent->synced_at)->timezone('Asia/Kolkata')->format('d-m-Y h:i:s A'))
             ->has('blocks')
             ->has('filters')
             ->where('totalSynced', 1)

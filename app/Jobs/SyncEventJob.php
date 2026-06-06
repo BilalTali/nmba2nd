@@ -17,10 +17,12 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use App\Traits\SharedCacheTrait;
+use Illuminate\Support\Facades\Cache;
 
 class SyncEventJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels, SharedCacheTrait;
 
     /**
      * Maximum seconds this job may run before the queue worker kills it.
@@ -64,7 +66,7 @@ class SyncEventJob implements ShouldQueue
         $this->event->refresh();
 
         // Pre-flight circuit breaker check: skip processing if the circuit breaker is active.
-        if (\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down') === true) {
+        if (Cache::get('sre_circuit_breaker_portal_down') === true) {
             Log::channel('sync')->info('Deferred Sync: Circuit breaker is active. Silently deleting job so scheduler can re-dispatch later.', [
                 'event_id' => $this->event->id,
             ]);
@@ -87,7 +89,7 @@ class SyncEventJob implements ShouldQueue
                 'last_attempt_at' => now(),
             ]);
             // Clear dispatch lock so the scheduler can re-select this event next sweep.
-            \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
+            Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
             $this->delete();
             return;
         }
@@ -123,10 +125,10 @@ class SyncEventJob implements ShouldQueue
                 $this->event->markSynced();
 
                 // Clear any pending dispatch cache lock
-                \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
+                Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
 
                 // Reset consecutive auth failures counter on success
-                \Illuminate\Support\Facades\Cache::forget('sre_consecutive_auth_failures');
+                Cache::forget('sre_consecutive_auth_failures');
 
                 // Audit log: record successful sync attempt
                 $this->writeSyncLog('success', null, null);
@@ -205,23 +207,23 @@ class SyncEventJob implements ShouldQueue
             Log::channel('sync')->warning('Error running health check during auth failure: ' . $e->getMessage());
         }
 
-        // Increment consecutive auth failures counter
-        $failures = (int) \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures', 0) + 1;
-        \Illuminate\Support\Facades\Cache::put('sre_consecutive_auth_failures', $failures, now()->addDays(1));
+        // Increment consecutive auth failures counter (shared so both slots/sites share the count)
+        $failures = (int) $this->getSharedValue('sre_consecutive_auth_failures', 0) + 1;
+        $this->setSharedValue('sre_consecutive_auth_failures', $failures, now()->addHours(4));
 
-        if ($failures >= 3) {
+        if ($failures >= 10) {
             $this->event->markFailed($errorMessage);
             // Reset sync status back to pending instead of keeping it in transient retry loop
             Event::where('id', $this->event->id)->update(['sync_status' => 'pending']);
 
             // Clear dispatch lock since auto-sync is paused
-            \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
+            Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
 
-            // Pause auto-sync globally
-            \Illuminate\Support\Facades\Cache::put('auto_sync_paused', true);
-            \Illuminate\Support\Facades\Cache::put('portal_credentials_invalid', true);
+            // 2-hour pause — gives portal time to recover without locking forever
+            $this->setSharedValue('auto_sync_paused', true, 7200);
+            $this->setSharedValue('portal_credentials_invalid', true, 7200);
 
-            Log::channel('sync')->error('AUTH FAILURE THRESHOLD REACHED: Event set to pending. Auto-sync paused.', [
+            Log::channel('sync')->error('AUTH FAILURE THRESHOLD REACHED: Event set to pending. Auto-sync paused for 2h.', [
                 'event_id'             => $this->event->id,
                 'consecutive_failures' => $failures,
                 'reason'               => mb_substr($errorMessage, 0, 500),
@@ -234,7 +236,7 @@ class SyncEventJob implements ShouldQueue
                 'consecutive_failures' => $failures,
                 'reason'               => mb_substr($errorMessage, 0, 200),
             ]);
-            $this->handleTransientFailure('Auth failure (attempt ' . $failures . ' of 3): ' . $errorMessage);
+            $this->handleTransientFailure('Auth failure (attempt ' . $failures . ' of 10): ' . $errorMessage);
         }
     }
 
@@ -256,7 +258,7 @@ class SyncEventJob implements ShouldQueue
         $this->event->markFailed($errorMessage);
 
         // Update dispatch lock to align with the backoff delay (plus 30s buffer)
-        \Illuminate\Support\Facades\Cache::put("sre_sync_dispatch_lock_{$this->event->id}", true, $delaySeconds + 30);
+        Cache::put("sre_sync_dispatch_lock_{$this->event->id}", true, $delaySeconds + 30);
 
         Log::channel('sync')->warning('Transient sync failure. Job released with 60-second backoff.', [
             'event_id'      => $this->event->id,
@@ -281,7 +283,7 @@ class SyncEventJob implements ShouldQueue
         $this->event->markFailedPermanently($errorMessage);
 
         // Clear dispatch lock
-        \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
+        Cache::forget("sre_sync_dispatch_lock_{$this->event->id}");
 
         Log::channel('sync')->error('PERMANENT FAILURE: Event dead-lettered.', [
             'event_id'      => $this->event->id,

@@ -594,10 +594,10 @@ class EventController extends Controller
                 ]);
 
             // Clear the circuit breaker so synchronization can run immediately
-            Cache::forget('sre_circuit_breaker_portal_down');
-            Cache::forget('auto_sync_paused');
-            Cache::forget('sre_consecutive_auth_failures');
-            Cache::forget('portal_credentials_invalid');
+            $this->forgetSharedValue('sre_circuit_breaker_portal_down');
+            $this->forgetSharedValue('auto_sync_paused');
+            $this->forgetSharedValue('sre_consecutive_auth_failures');
+            $this->forgetSharedValue('portal_credentials_invalid');
 
             // Force dashboard metrics to refresh
             Cache::forget('dashboard_metrics_counts');
@@ -630,6 +630,24 @@ class EventController extends Controller
         // Read strictly from the cache to prevent slow HTTP requests from blocking the SAPI/serve process.
         $isOnline = $this->getSharedValue('sre_portal_is_alive', false) === true 
             && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true;
+
+        // ── Fast fallback: cross-site portal_live_window ──────────────────────
+        // If the web cron confirmed the portal alive within the last 300 seconds (written to
+        // portal_live_window.json), trust it even if sre_portal_is_alive has expired.
+        // This prevents the dashboard from flipping to "Offline" when the cron hits a
+        // transient 522 and doesn't refresh the signal for a few minutes.
+        if (!$isOnline) {
+            $liveWindow = $this->readPortalLiveWindow();
+            if ($liveWindow !== null && (time() - $liveWindow) < 300) {
+                // Cron confirmed portal alive recently — restore the shared cache so probes skip
+                $this->setSharedValue('sre_portal_is_alive', true, 360);
+                $this->forgetSharedValue('sre_circuit_breaker_portal_down');
+                $isOnline = true;
+                Log::channel('sync')->info('Dashboard health check: portal_live_window hit — restoring online state.', [
+                    'window_age_seconds' => time() - $liveWindow,
+                ]);
+            }
+        }
 
         $isPaused = $this->getSharedValue('auto_sync_paused', false);
         $credentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);

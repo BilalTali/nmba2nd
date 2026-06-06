@@ -77,7 +77,7 @@ function loadEnvValue(string $filePath, string $key): string
 
 $envFile      = APP_ROOT . '/.env';
 $cronToken    = loadEnvValue($envFile, 'CRON_TOKEN');
-$portalUrl    = rtrim(loadEnvValue($envFile, 'PORTAL_URL'), '/') . '/login';
+$portalUrl    = loadEnvValue($envFile, 'PORTAL_URL');
 $peerCronUrl  = loadEnvValue($envFile, 'PEER_CRON_URL');
 $peerCronToken = loadEnvValue($envFile, 'PEER_CRON_TOKEN');
 
@@ -144,6 +144,27 @@ function readPortalLiveWindowAge(): ?int
     return time() - (int) $d['probed_at'];
 }
 
+function setSharedValue(string $key, $value, int $ttl): void
+{
+    if (!is_dir(SHARED_DIR) || !is_writable(SHARED_DIR)) {
+        return;
+    }
+    $path = SHARED_DIR . '/' . $key . '.json';
+    $data = [
+        'value'      => $value,
+        'expires_at' => time() + $ttl,
+    ];
+    file_put_contents($path, json_encode($data));
+}
+
+function forgetSharedValue(string $key): void
+{
+    $path = SHARED_DIR . '/' . $key . '.json';
+    if (file_exists($path)) {
+        @unlink($path);
+    }
+}
+
 // ── Helper: fire an async HTTP request (fire-and-forget) ──────────────────────
 function fireAsync(string $url): void
 {
@@ -177,12 +198,12 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
     $probedDirectly = false;
     file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: cross-site live window hit (age ' . $liveWindowAge . 's) — skipping own probe.' . PHP_EOL, FILE_APPEND);
 } else {
-    // Probe directly — 12s timeout, no cache
+    // Probe directly — 90s timeout, no cache (resilient to portal slowness)
     $probedDirectly = true;
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $portalUrl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 90);
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
     curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
@@ -212,8 +233,13 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
 }
 
 if (!$portalIsAlive) {
-    // Portal is dead — write the signal so the scheduler doesn't waste time probing
-    forgetPortalLiveWindow();
+    // Portal is dead — only delete the live window if it's already stale.
+    // A single transient 522 should NOT destroy a recently-valid cross-site signal.
+    // Other sites and the dashboard rely on portal_live_window.json for up to 300 seconds.
+    $liveWindowAge = readPortalLiveWindowAge();
+    if ($liveWindowAge === null || $liveWindowAge > 120) {
+        forgetPortalLiveWindow();
+    }
 
     $lockReleased = true;
     @unlink($lockFile);
@@ -254,6 +280,8 @@ try {
     // Check circuit breaker — but since we just probed alive, clear it
     \Illuminate\Support\Facades\Cache::forget('sre_circuit_breaker_portal_down');
     \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 360);
+    forgetSharedValue('sre_circuit_breaker_portal_down');
+    setSharedValue('sre_portal_is_alive', true, 360);
 
     // Run schedule:run (dispatches SyncBatchJobs for all pending events)
     $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
@@ -293,11 +321,11 @@ try {
             $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 15);
 
             if (!$stillAlive) {
-                // Quick direct probe
+                // Quick direct probe (increased timeout, do not delete live window on failure)
                 $ch2 = curl_init();
                 curl_setopt($ch2, CURLOPT_URL, $portalUrl);
                 curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
-                curl_setopt($ch2, CURLOPT_TIMEOUT, 6);
+                curl_setopt($ch2, CURLOPT_TIMEOUT, 30);
                 curl_setopt($ch2, CURLOPT_NOSIGNAL, 1);
                 curl_setopt($ch2, CURLOPT_SSL_VERIFYPEER, false);
                 curl_setopt($ch2, CURLOPT_SSL_VERIFYHOST, false);
@@ -309,8 +337,6 @@ try {
                     ($recheckBody && str_contains($recheckBody, 'type="password"')));
                 if ($stillAlive) {
                     writePortalLiveWindow();
-                } else {
-                    forgetPortalLiveWindow();
                 }
             }
 

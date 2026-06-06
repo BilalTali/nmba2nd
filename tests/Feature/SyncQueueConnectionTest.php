@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Block;
 use App\Models\Event;
 use App\Jobs\SyncEventJob;
+use App\Jobs\SyncBatchJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -98,7 +99,7 @@ class SyncQueueConnectionTest extends TestCase
         $this->artisan('schedule:run');
 
         // Assert that the job was not dispatched because the lock was active
-        Queue::assertNotPushed(SyncEventJob::class);
+        Queue::assertNotPushed(SyncBatchJob::class);
 
         \Illuminate\Support\Carbon::setTestNow(null);
     }
@@ -147,7 +148,7 @@ class SyncQueueConnectionTest extends TestCase
         $this->artisan('schedule:run');
 
         // Assert that the job was pushed
-        Queue::assertPushed(SyncEventJob::class, function ($job) use ($event) {
+        Queue::assertPushed(SyncBatchJob::class, function ($job) use ($event) {
             return $job->connection === 'database';
         });
 
@@ -199,18 +200,18 @@ class SyncQueueConnectionTest extends TestCase
             ->onlyMethods(['release'])
             ->getMock();
 
-        // Expect the release method to be called (with a 300 second delay)
+        // Expect the release method to be called (with a 60 second delay)
         $job->expects($this->once())
             ->method('release')
-            ->with(300);
+            ->with(60);
 
         // Run the job handler via Laravel Container injection
         $this->app->call([$job, 'handle']);
 
-        // Assert event status remains 'pending' and sync_attempts remains 0
+        // Assert event status remains 'pending' and sync_attempts is incremented to 1
         $event->refresh();
         $this->assertEquals('pending', $event->sync_status);
-        $this->assertEquals(0, $event->sync_attempts);
+        $this->assertEquals(1, $event->sync_attempts);
     }
 
     /** @test */
@@ -361,31 +362,31 @@ class SyncQueueConnectionTest extends TestCase
         $healthMock = $this->mock(\App\Services\PortalHealthService::class);
         $healthMock->shouldReceive('isAlive')->andReturn(true);
 
-        // Run the first failure
-        $job = new SyncEventJob($event);
-        $this->app->call([$job, 'handle']);
+        // Run failures 1 to 9
+        for ($i = 1; $i <= 9; $i++) {
+            $event->refresh();
+            $event->sync_status = 'pending';
+            $event->sync_attempts = 0;
+            $event->save();
 
-        $this->assertEquals(1, \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures'));
-        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
+            $job = new SyncEventJob($event);
+            $this->app->call([$job, 'handle']);
 
-        // Run the second failure
-        $event->refresh();
-        $event->sync_status = 'pending'; // reset status to test again
-        $event->save();
-        $job2 = new SyncEventJob($event);
-        $this->app->call([$job2, 'handle']);
+            $this->assertEquals($i, \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures'));
+            $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
+            $this->assertFalse(\Illuminate\Support\Facades\Cache::has('auto_sync_paused'));
+        }
 
-        $this->assertEquals(2, \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures'));
-        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
-
-        // Run the third failure (threshold breach)
+        // Run the 10th failure (threshold breach)
         $event->refresh();
         $event->sync_status = 'pending';
+        $event->sync_attempts = 0;
         $event->save();
-        $job3 = new SyncEventJob($event);
-        $this->app->call([$job3, 'handle']);
 
-        $this->assertEquals(3, \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures'));
+        $job10 = new SyncEventJob($event);
+        $this->app->call([$job10, 'handle']);
+
+        $this->assertEquals(10, \Illuminate\Support\Facades\Cache::get('sre_consecutive_auth_failures'));
         $this->assertTrue(\Illuminate\Support\Facades\Cache::get('portal_credentials_invalid'));
         $this->assertTrue(\Illuminate\Support\Facades\Cache::get('auto_sync_paused'));
     }

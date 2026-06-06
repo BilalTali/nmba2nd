@@ -22,7 +22,7 @@ class PortalHealthService
      * Reduced from 90s → 12s: if the portal is alive it responds fast;
      * a 90-second hang just wastes the entire cron window.
      */
-    protected int $timeout = 30;
+    protected int $timeout = 90;
 
     /**
      * How long (seconds) to trust a "portal is alive" result before re-probing.
@@ -46,7 +46,7 @@ class PortalHealthService
 
     public function __construct()
     {
-        $this->loginUrl = rtrim((string) config('services.portal.url'), '/') . '/login';
+        $this->loginUrl = (string) config('services.portal.url');
     }
 
     public function getLastResponseTime(): float
@@ -177,7 +177,11 @@ class PortalHealthService
         ]);
 
         $this->forgetSharedValue('sre_portal_is_alive');
-        $this->forgetPortalLiveWindow();
+        // NOTE: We deliberately do NOT call forgetPortalLiveWindow() here.
+        // portal_live_window.json is written by direct HTTP probes (cron/PortalHealthService::isAlive).
+        // It is only authoritative when deleted by a direct probe that found the portal dead.
+        // Deleting it here (on a transient 522 from a sync job session check) would destroy
+        // the dashboard's fallback signal unnecessarily during brief circuit breaker cycles.
         $this->setSharedValue('sre_circuit_breaker_portal_down', true, $this->breakerTtl);
     }
 }

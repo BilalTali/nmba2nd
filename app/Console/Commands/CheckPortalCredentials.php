@@ -38,7 +38,7 @@ class CheckPortalCredentials extends Command
             return self::FAILURE;
         }
 
-        $loginUrl = $url . '/login';
+        $loginUrl = $url;
         $authUrl  = $url . '/authenticate';
 
         $this->line("Testing portal credentials for <info>{$email}</info> at <info>{$url}</info>...");

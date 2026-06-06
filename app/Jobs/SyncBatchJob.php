@@ -114,27 +114,37 @@ class SyncBatchJob implements ShouldQueue
                 'slot'  => $this->sessionSlot,
                 'error' => $e->getMessage(),
             ]);
-            $this->release(300);
+            $this->release(60);
             return;
         } catch (Exception $e) {
             Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Unexpected error during login. Releasing batch.", [
                 'slot'  => $this->sessionSlot,
                 'error' => $e->getMessage(),
             ]);
-            $this->release(300);
+            $this->release(60);
             return;
         }
 
         // ── Step 2: Process each event in the batch ───────────────────────────
-        $successCount = 0;
-        $failureCount = 0;
+        $successCount    = 0;
+        $failureCount    = 0;
+        $processedIds    = []; // tracks events we started processing (for lock cleanup)
 
         foreach ($this->eventIds as $eventId) {
-            // Guard: Stop mid-batch if circuit breaker tripped
+            // Guard: Stop mid-batch if circuit breaker tripped.
+            // IMPORTANT: clear dispatch locks for all events we haven't touched yet,
+            // so the next scheduler sweep (after the 8s circuit breaker cooldown)
+            // can immediately pick them up instead of waiting 10 minutes.
             if (Cache::get('sre_circuit_breaker_portal_down') === true) {
+                $unprocessedIds = array_diff($this->eventIds, $processedIds);
+                foreach ($unprocessedIds as $unprocessedId) {
+                    Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
+                }
                 Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker tripped mid-batch. Halting remaining events.");
                 break;
             }
+
+            $processedIds[] = $eventId;
 
             $event = Event::find($eventId);
 
@@ -293,17 +303,22 @@ class SyncBatchJob implements ShouldQueue
     /**
      * Handle a credential failure that should pause the entire sync system.
      * Mirrors the same pausing logic from SyncEventJob::handleAuthFailure().
+     *
+     * Threshold raised to 10: with 2 parallel slots both failing on the same portal
+     * flap, the counter advances 2 per cycle. 3 was too aggressive.
+     * TTL reduced to 2h: 365-day pauses are catastrophic for transient flaps.
      */
     protected function handleAuthFailureForBatch(string $errorMessage): void
     {
         $failures = (int) $this->getSharedValue('sre_consecutive_auth_failures', 0) + 1;
-        $this->setSharedValue('sre_consecutive_auth_failures', $failures, now()->addDays(1));
+        $this->setSharedValue('sre_consecutive_auth_failures', $failures, now()->addHours(4));
 
-        if ($failures >= 3) {
-            $this->setSharedValue('auto_sync_paused', true, 86400 * 365);
-            $this->setSharedValue('portal_credentials_invalid', true, 86400 * 365);
+        if ($failures >= 10) {
+            // 2-hour pause — gives the portal time to recover without locking forever
+            $this->setSharedValue('auto_sync_paused', true, 7200);
+            $this->setSharedValue('portal_credentials_invalid', true, 7200);
 
-            Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: AUTH FAILURE THRESHOLD REACHED. Auto-sync paused.", [
+            Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: AUTH FAILURE THRESHOLD REACHED. Auto-sync paused for 2h.", [
                 'slot'                 => $this->sessionSlot,
                 'consecutive_failures' => $failures,
                 'reason'               => mb_substr($errorMessage, 0, 500),
@@ -313,7 +328,7 @@ class SyncBatchJob implements ShouldQueue
                 'slot'                 => $this->sessionSlot,
                 'consecutive_failures' => $failures,
             ]);
-            $this->release(300); // retry batch in 5 minutes
+            $this->release(60); // retry batch in 60 seconds (portal may recover quickly)
         }
     }
 

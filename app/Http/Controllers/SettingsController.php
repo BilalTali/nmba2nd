@@ -4,9 +4,12 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
+use App\Traits\SharedCacheTrait;
 
 class SettingsController extends Controller
 {
+    use SharedCacheTrait;
+
     public function updateEnv(Request $request)
     {
         $request->validate([
@@ -25,9 +28,9 @@ class SettingsController extends Controller
 
         \Illuminate\Support\Facades\Artisan::call('config:clear');
 
-        \Illuminate\Support\Facades\Cache::forget('auto_sync_paused');
-        \Illuminate\Support\Facades\Cache::forget('sre_consecutive_auth_failures');
-        \Illuminate\Support\Facades\Cache::forget('portal_credentials_invalid');
+        $this->forgetSharedValue('auto_sync_paused');
+        $this->forgetSharedValue('sre_consecutive_auth_failures');
+        $this->forgetSharedValue('portal_credentials_invalid');
 
         return redirect()->back()->with('success', 'Credentials updated successfully.');
     }

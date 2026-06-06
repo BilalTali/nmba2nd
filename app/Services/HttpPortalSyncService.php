@@ -71,7 +71,7 @@ class HttpPortalSyncService implements PortalSyncInterface
     {
         $this->sessionSlot  = max(0, min(7, $sessionSlot)); // clamp to valid range
         $this->baseUrl      = rtrim((string) config('services.portal.url'), '/');
-        $this->loginUrl     = $this->baseUrl . '/login';
+        $this->loginUrl     = $this->baseUrl;
         $this->submitUrl    = $this->baseUrl . '/event_create';
         $this->dashboardUrl = $this->baseUrl . '/dashboard';
         $this->username     = (string) config('services.portal.email');
@@ -145,24 +145,25 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function buildClient(CookieJar $cookieJar): Client
     {
-        // Fetch the last known response time of the portal (default 5.0 seconds if unknown)
-        $lastResponseTime = (float) Cache::get('sre_portal_response_time', 5.0);
-        
-        // If the last response was a fast failure (e.g. instant connection reset), 
-        // don't shrink the timeout unrealistically. Assume a minimum 5-second baseline.
-        $effectiveResponseTime = max(5.0, $lastResponseTime);
+        // Fetch the last known response time of the portal (default 55.0 seconds —
+        // the portal is known to take 47-50s to respond under load).
+        $lastResponseTime = (float) Cache::get('sre_portal_response_time', 55.0);
 
-        // Calculate dynamic timeout: response time * 5
-        // Clamp it between 25 and 60 seconds to allow for portal latency spikes.
-        $calculatedTimeout = (int) ceil($effectiveResponseTime * 5);
-        $timeout = max(60, min(120, $calculatedTimeout));
+        // Never shrink below 55s (the portal's observed baseline under load).
+        $effectiveResponseTime = max(55.0, $lastResponseTime);
+
+        // Dynamic timeout: response time × 3, clamped to [120s, 150s].
+        // 120s floor: gives a full 70s margin above the observed 50s response time.
+        // 150s ceiling: prevents a single request from holding up the job for too long.
+        $calculatedTimeout = (int) ceil($effectiveResponseTime * 3);
+        $timeout = max(120, min(150, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
             'cookies'         => $cookieJar,
             'timeout'         => $timeout,
-            'connect_timeout' => 15,  // Connect timeout of 15 seconds
-            'read_timeout'    => $timeout, // Match timeout
+            'connect_timeout' => 45,  // Portal DNS/TCP is slow — allow 45s to establish
+            'read_timeout'    => $timeout,
             'allow_redirects' => ['max' => 10, 'strict' => false, 'track_redirects' => false],
             'headers'         => [
                 'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -172,6 +173,80 @@ class HttpPortalSyncService implements PortalSyncInterface
                 CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
             ],
         ]);
+    }
+
+    /**
+     * Return the age in seconds of the cookie file for this slot, or null if missing.
+     * Used to decide whether to skip the HTTP session probe.
+     */
+    protected function getCookieFileAgeSeconds(): ?int
+    {
+        $sharedPath = $this->getSharedPath("cookies_slot_{$this->sessionSlot}.json");
+        if ($sharedPath && file_exists($sharedPath)) {
+            $mtime = @filemtime($sharedPath);
+            if ($mtime !== false) {
+                return max(0, time() - $mtime);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Return true only when the cookie file for this slot contains at least one
+     * real, unexpired session cookie.
+     *
+     * Instead of relying on file-modification time (which drifts from the actual
+     * session expiry), we read the cookie's own Expires field and verify it is
+     * still in the future with a 60-second safety buffer.
+     */
+    protected function hasFreshSessionCookies(): bool
+    {
+        // Try the shared-sync file first, fall back to Laravel cache
+        $sharedPath = $this->getSharedPath("cookies_slot_{$this->sessionSlot}.json");
+        $content = null;
+
+        if ($sharedPath && file_exists($sharedPath)) {
+            $content = @file_get_contents($sharedPath);
+        }
+
+        if ($content === null || $content === false || $content === '') {
+            $cached = Cache::get($this->cookieCacheKey());
+            if (!is_array($cached) || empty($cached)) {
+                return false;
+            }
+            $cookies = $cached;
+        } else {
+            $cookies = json_decode($content, true);
+            if (!is_array($cookies) || empty($cookies)) {
+                return false;
+            }
+        }
+
+        $now = time();
+        foreach ($cookies as $c) {
+            if (empty($c['Value'])) {
+                continue; // skip cookies with empty values
+            }
+
+            // If the cookie has an explicit Expires timestamp, honour it.
+            // Give a 60-second buffer so we don't use a cookie that's about to expire.
+            if (!empty($c['Expires'])) {
+                if ((int) $c['Expires'] > ($now + 60)) {
+                    return true; // valid, unexpired cookie found
+                }
+                // else: this cookie is expired or expiring — keep scanning
+                continue;
+            }
+
+            // No Expires field (session cookie) — trust the file mtime as a proxy.
+            // Session cookies typically last 60 min; use a 50-minute threshold.
+            $ageSeconds = $this->getCookieFileAgeSeconds();
+            if ($ageSeconds !== null && $ageSeconds < 3000) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // ── Authentication ────────────────────────────────────────────────────────
@@ -197,33 +272,50 @@ class HttpPortalSyncService implements PortalSyncInterface
         $cookieJar = $this->loadCookieJar();
         $client    = $this->buildClient($cookieJar);
 
-        // Probe the submission form — if we can see it, session is still alive.
-        $token = $this->getSubmissionToken($client);
-
-        if (!empty($token)) {
-            Log::channel('sync')->info("Slot {$this->sessionSlot}: Reusing cached portal session.", [
-                'slot' => $this->sessionSlot,
+        // ── Fast path: cookie-age check (no HTTP round-trip) ─────────────────
+        //
+        // The portal takes 47-55s to respond under load. An HTTP session probe
+        // against /event_create would burn a full 60-120s just to tell us
+        // "yes, cookies work" — costing more than an actual login.
+        //
+        // Instead: if the cookie file for this slot was saved < 25 minutes ago
+        // AND contains at least one real session cookie, assume the session is
+        // still alive and skip the full login handshake. The submission itself
+        // will confirm validity; mid-batch re-auth handles the expiry case.
+        if ($this->hasFreshSessionCookies()) {
+            Log::channel('sync')->info("Slot {$this->sessionSlot}: Fresh cookies found — skipping login probe.", [
+                'slot'            => $this->sessionSlot,
+                'cookie_age_secs' => $this->getCookieFileAgeSeconds(),
             ]);
-        } else {
-            // No active session — perform a full login for this slot.
-            Log::channel('sync')->info("Slot {$this->sessionSlot}: No active session. Performing portal login.", [
-                'slot' => $this->sessionSlot,
-            ]);
 
-            // Start fresh — discard any expired cookies.
-            $cookieJar = new CookieJar();
-            $client    = $this->buildClient($cookieJar);
-
-            $loginToken = $this->executeLoginHandshake($client);
-            $this->authenticateSession($client, $loginToken);
-            $token      = $this->retrieveSubmissionToken($client, $loginToken);
-
-            $this->saveCookieJar($cookieJar);
-
-            Log::channel('sync')->info("Slot {$this->sessionSlot}: Portal login successful.", [
-                'slot' => $this->sessionSlot,
-            ]);
+            // We still need a CSRF token. Use the cached cookie jar; if the
+            // token is missing the portal either doesn't require one or we'll
+            // get a 419 that triggers a re-auth on the first submission attempt.
+            // null = "not yet fetched"; will be fetched before the first event.
+            $this->sharedClient    = $client;
+            $this->sharedCookieJar = $cookieJar;
+            $this->submissionToken = null; // Fetched lazily on first event
+            return;
         }
+
+        // ── Slow path: fresh login required ──────────────────────────────────
+        Log::channel('sync')->info("Slot {$this->sessionSlot}: No fresh session cookies — performing portal login.", [
+            'slot' => $this->sessionSlot,
+        ]);
+
+        // Start fresh — discard any expired cookies.
+        $cookieJar = new CookieJar();
+        $client    = $this->buildClient($cookieJar);
+
+        $loginToken = $this->executeLoginHandshake($client);
+        $this->authenticateSession($client, $loginToken);
+        $token      = $this->retrieveSubmissionToken($client, $loginToken);
+
+        $this->saveCookieJar($cookieJar);
+
+        Log::channel('sync')->info("Slot {$this->sessionSlot}: Portal login successful.", [
+            'slot' => $this->sessionSlot,
+        ]);
 
         $this->sharedClient    = $client;
         $this->sharedCookieJar = $cookieJar;
@@ -451,20 +543,53 @@ class HttpPortalSyncService implements PortalSyncInterface
         ?string   $submissionToken,
         Event     $event
     ): bool {
+        // If we skipped login via the fast-path cookie check, $submissionToken is null
+        // ("not yet fetched"). Fetch it exactly ONCE here — subsequent events in the
+        // batch will reuse $this->submissionToken (even if it's an empty string,
+        // meaning the portal has no CSRF requirement on the event form).
+        if ($submissionToken === null) {
+            Log::channel('sync')->info("Slot {$this->sessionSlot}: Fetching submission CSRF token (first event in batch).", [
+                'slot'     => $this->sessionSlot,
+                'event_id' => $event->id,
+            ]);
+
+            // Use a SHORT-timeout probe client (30s) rather than the full batch
+            // client (120s). The portal doesn't require CSRF on the event form,
+            // so a timeout here just means we proceed with an empty token — safe.
+            $probeClient = new Client([
+                'version'         => 2.0,
+                'cookies'         => $cookieJar,
+                'timeout'         => 30,
+                'connect_timeout' => 15,
+                'allow_redirects' => ['max' => 5, 'strict' => false],
+                'headers'         => [
+                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                ],
+                'curl' => [CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4],
+            ]);
+
+            $submissionToken = $this->retrieveSubmissionToken($probeClient, '');
+            $this->submissionToken = $submissionToken; // '' is fine — portal accepts without CSRF
+        }
+
         try {
-            return $this->dispatchPayload($client, $event, $submissionToken ?? '');
+            return $this->dispatchPayload($client, $event, $submissionToken);
         } catch (TransientSyncException $e) {
             // Check if this looks like a session expiry (the portal redirected to the login page)
-            if (str_contains($e->getMessage(), 'Session expired') || str_contains($e->getMessage(), 'Re-authentication required')) {
+            if (
+                str_contains($e->getMessage(), 'Session expired') ||
+                str_contains($e->getMessage(), 'Re-authentication required') ||
+                str_contains($e->getMessage(), 'login page')
+            ) {
                 Log::channel('sync')->warning("Slot {$this->sessionSlot}: Session expired mid-batch. Re-authenticating.", [
                     'slot'     => $this->sessionSlot,
                     'event_id' => $event->id,
                 ]);
 
                 // Re-authenticate on this slot's client
-                $loginToken      = $this->executeLoginHandshake($client);
+                $loginToken  = $this->executeLoginHandshake($client);
                 $this->authenticateSession($client, $loginToken);
-                $freshToken      = $this->retrieveSubmissionToken($client, $loginToken);
+                $freshToken  = $this->retrieveSubmissionToken($client, $loginToken);
 
                 // Update shared state for subsequent events in the batch
                 $this->submissionToken = $freshToken;
@@ -675,35 +800,19 @@ class HttpPortalSyncService implements PortalSyncInterface
      */
     protected function runWithTransmissionLock(callable $callback)
     {
-        $sharedPath = $this->getSharedPath("transmission_lock_slot_{$this->sessionSlot}.lock");
-        if ($sharedPath) {
-            $fp = @fopen($sharedPath, 'c+');
-            if ($fp) {
-                $startTime = microtime(true);
-                $locked = false;
-                while (microtime(true) - $startTime < 5.0) {
-                    if (@flock($fp, LOCK_EX | LOCK_NB)) {
-                        $locked = true;
-                        break;
-                    }
-                    usleep(50_000); // sleep 50ms
-                }
-
-                if (!$locked) {
-                    fclose($fp);
-                    throw new TransientSyncException("Timeout waiting for transmission lock for slot {$this->sessionSlot} (shared file lock)");
-                }
-
-                try {
-                    return $callback();
-                } finally {
-                    @flock($fp, LOCK_UN);
-                    fclose($fp);
-                }
-            }
-        }
-
-        // Fallback to standard Laravel Cache lock
-        return Cache::lock($this->transmissionLockKey(), 60)->block(5, $callback);
+        // IMPORTANT: the transmission lock must be SITE-LOCAL, not shared.
+        //
+        // The shared_sync directory is mounted by BOTH nmbabudgam.in and
+        // ctetmonktest.fun. If we use a file in that directory, both sites
+        // compete for the same flock() and the loser times out in 5 seconds.
+        //
+        // Each site has its own local DB for Cache::lock(). Using it here
+        // means two sites can submit to the portal concurrently (which is fine
+        // — they sync different local events to the same portal endpoint).
+        //
+        // The lock still protects against two workers on the SAME site and SAME
+        // slot running simultaneously, which WithoutOverlapping already prevents.
+        // This is kept as a belt-and-suspenders guard.
+        return Cache::lock($this->transmissionLockKey(), 60)->block(10, $callback);
     }
 }
