@@ -84,7 +84,7 @@ class Kernel extends ConsoleKernel
                         Event::where('sync_status', 'pending')
                             ->chunk(100, function ($pendingEvents) {
                                 foreach ($pendingEvents as $pe) {
-                                    \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$pe->id}");
+                                    Cache::forget("sre_sync_dispatch_lock_{$pe->id}");
                                 }
                             });
                     } catch (\Throwable $e) {

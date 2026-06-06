@@ -165,6 +165,20 @@ function forgetSharedValue(string $key): void
     }
 }
 
+function getSharedValue(string $key, $default = null)
+{
+    $path = SHARED_DIR . '/' . $key . '.json';
+    if (!file_exists($path)) {
+        return $default;
+    }
+    $data = json_decode(file_get_contents($path), true);
+    if (!$data || !isset($data['expires_at']) || $data['expires_at'] < time()) {
+        @unlink($path);
+        return $default;
+    }
+    return $data['value'];
+}
+
 // ── Helper: fire an async HTTP request (fire-and-forget) ──────────────────────
 function fireAsync(string $url): void
 {
@@ -239,6 +253,43 @@ if (!$portalIsAlive) {
     $liveWindowAge = readPortalLiveWindowAge();
     if ($liveWindowAge === null || $liveWindowAge > 120) {
         forgetPortalLiveWindow();
+    }
+
+    $wasOffline = getSharedValue('sre_last_portal_was_offline', false);
+    if (!$wasOffline) {
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Portal transitioned to OFFLINE. Sweeping queue and resetting event statuses.' . PHP_EOL, FILE_APPEND);
+        try {
+            if (file_exists(APP_ROOT . '/vendor/autoload.php') && file_exists(APP_ROOT . '/bootstrap/app.php')) {
+                require APP_ROOT . '/vendor/autoload.php';
+                $app = require_once APP_ROOT . '/bootstrap/app.php';
+                /** @var \Illuminate\Contracts\Console\Kernel $kernel */
+                $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+                $kernel->bootstrap();
+
+                // Clear the default queue
+                \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'default')->delete();
+
+                // Reset all events currently marked 'syncing' back to 'pending'
+                \App\Models\Event::where('sync_status', 'syncing')
+                    ->update([
+                        'sync_status' => 'pending',
+                        'last_attempt_at' => now(),
+                    ]);
+
+                // Clear dispatch locks for pending events
+                \App\Models\Event::where('sync_status', 'pending')
+                    ->chunk(100, function ($pendingEvents) {
+                        foreach ($pendingEvents as $pe) {
+                            \Illuminate\Support\Facades\Cache::forget("sre_sync_dispatch_lock_{$pe->id}");
+                        }
+                    });
+
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Queue sweep and dispatch locks cleared successfully.' . PHP_EOL, FILE_APPEND);
+            }
+        } catch (\Throwable $e) {
+            file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Failed to sweep queue on offline transition: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
+        }
+        setSharedValue('sre_last_portal_was_offline', true, 7200);
     }
 
     $lockReleased = true;
