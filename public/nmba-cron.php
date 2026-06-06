@@ -302,13 +302,10 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
 }
 
 if (!$portalIsAlive) {
-    // Portal is dead — only delete the live window if it's already stale.
-    // A single transient 522 should NOT destroy a recently-valid cross-site signal.
-    // Other sites and the dashboard rely on portal_live_window.json for up to 300 seconds.
-    $liveWindowAge = readPortalLiveWindowAge();
-    if ($liveWindowAge === null || $liveWindowAge > 120) {
-        forgetPortalLiveWindow();
-    }
+    // Portal is dead — immediately forget the live window and the local alive state
+    // so that the dashboard updates to Offline status instantly without cached delay.
+    forgetPortalLiveWindow();
+    forgetSharedValue('sre_portal_is_alive');
 
     $wasOffline = getSharedValue('sre_last_portal_was_offline', false);
     if (!$wasOffline) {
