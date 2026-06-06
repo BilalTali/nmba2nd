@@ -116,6 +116,7 @@ class PortalHealthService
             Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
 
             if ($response->getStatusCode() !== 200) {
+                $this->forgetPortalLiveWindow();
                 if (!$bypassCache) {
                     $this->tripCircuitBreaker(
                         'Non-200 status received: ' . $response->getStatusCode()
@@ -132,6 +133,7 @@ class PortalHealthService
             $hasPasswordField = $crawler->filter('input[type="password"]')->count() > 0;
 
             if (!$hasUsernameField || !$hasPasswordField) {
+                $this->forgetPortalLiveWindow();
                 if (!$bypassCache) {
                     $this->tripCircuitBreaker(
                         'Portal DOM changed — authentication fields missing from login page.'
@@ -156,6 +158,7 @@ class PortalHealthService
             return true;
 
         } catch (Exception $e) {
+            $this->forgetPortalLiveWindow();
             $this->lastResponseTime = microtime(true) - $startTime;
             Cache::put('sre_portal_response_time', $this->lastResponseTime, now()->addMinutes(10));
             if (!$bypassCache) {
