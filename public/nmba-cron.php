@@ -93,6 +93,61 @@ if (!hash_equals($cronToken, $requestToken)) {
     die('Forbidden');
 }
 
+if (($_GET['run_worker'] ?? '') === 'true') {
+    try {
+        if (!file_exists(APP_ROOT . '/vendor/autoload.php')) {
+            throw new \Exception('Composer autoload not found.');
+        }
+        require APP_ROOT . '/vendor/autoload.php';
+
+        if (!file_exists(APP_ROOT . '/bootstrap/app.php')) {
+            throw new \Exception('Laravel bootstrap app.php not found.');
+        }
+        $app = require_once APP_ROOT . '/bootstrap/app.php';
+
+        /** @var \Illuminate\Contracts\Console\Kernel $kernel */
+        $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+        $kernel->bootstrap();
+
+        // Run queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty');
+        $exitCode   = $kernel->handle($input, $output);
+        $outputText = $output->fetch();
+
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Async Worker Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL, FILE_APPEND);
+
+        // Check if there are still jobs in the queue, and if the portal is alive.
+        // If so, spawn another async worker loopback!
+        $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
+            ->where('queue', 'default')
+            ->whereNull('reserved_at')
+            ->where('available_at', '<=', time())
+            ->count();
+
+        if ($remainingJobs > 0) {
+            $liveWindowAge = readPortalLiveWindowAge();
+            $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 15);
+            if ($stillAlive && !\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down')) {
+                $host     = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
+                $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+                $selfUrl  = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken) . '&run_worker=true';
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Spawning replacement worker: {$remainingJobs} jobs remain." . PHP_EOL, FILE_APPEND);
+                fireAsync($selfUrl);
+            }
+        }
+
+        http_response_code(200);
+        header('Content-Type: text/plain');
+        echo "Async worker cycle completed.\n" . $outputText;
+        exit;
+
+    } catch (\Throwable $e) {
+        http_response_code(500);
+        die('Worker Error: ' . $e->getMessage());
+    }
+}
+
 // ── Lockfile: prevent overlapping cron runs ───────────────────────────────────
 $lockFile = sys_get_temp_dir() . '/nmba_queue_worker_' . md5(APP_ROOT) . '.lock';
 if (file_exists($lockFile)) {
@@ -344,71 +399,34 @@ try {
         file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Scheduler Output:' . PHP_EOL . $scheduleText . PHP_EOL, FILE_APPEND);
     }
 
-    // Run queue:work for up to 50 seconds — processes the dispatched SyncBatchJobs
-    $output = new \Symfony\Component\Console\Output\BufferedOutput();
-    $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty');
-    $exitCode   = $kernel->handle($input, $output);
-    $outputText = $output->fetch();
+    // Now, instead of running a worker synchronously, spawn parallel async workers!
+    $pendingJobs = \Illuminate\Support\Facades\DB::table('jobs')
+        ->where('queue', 'default')
+        ->whereNull('reserved_at')
+        ->where('available_at', '<=', time())
+        ->count();
 
-    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL, FILE_APPEND);
+    $maxSlots = (int) config('services.sync.max_slots', 8);
+    $workersToSpawn = min($maxSlots, $pendingJobs);
 
-    // ── STEP 4: Post-work — re-probe + loopback if more jobs remain ──────────
+    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Scheduler finished. Pending jobs: {$pendingJobs}. Max slots: {$maxSlots}. Spawning {$workersToSpawn} parallel workers." . PHP_EOL, FILE_APPEND);
+
+    if ($workersToSpawn > 0 && !str_contains($_SERVER['HTTP_HOST'] ?? '', 'localhost') && !str_contains($_SERVER['HTTP_HOST'] ?? '', '127.0.0.1')) {
+        $host     = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
+        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $selfUrl  = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken) . '&run_worker=true';
+
+        for ($i = 0; $i < $workersToSpawn; $i++) {
+            fireAsync($selfUrl);
+        }
+    }
+
     $lockReleased = true;
     @unlink($lockFile);
 
-    try {
-        $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
-            ->where('queue', 'default')
-            ->whereNull('reserved_at')
-            ->where('available_at', '<=', time())
-            ->count();
-
-        $host        = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
-        $isLocalhost = str_contains($host, 'localhost') || str_contains($host, '127.0.0.1');
-
-        if ($remainingJobs > 0 && !$isLocalhost) {
-            // Quick re-probe before loopback (2s timeout, reuse live window if fresh)
-            $liveWindowAge = readPortalLiveWindowAge();
-            $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 15);
-
-            if (!$stillAlive) {
-                // Quick direct probe (increased timeout, do not delete live window on failure)
-                $ch2 = curl_init();
-                curl_setopt($ch2, CURLOPT_URL, $portalUrl);
-                curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
-                curl_setopt($ch2, CURLOPT_TIMEOUT, 30);
-                curl_setopt($ch2, CURLOPT_NOSIGNAL, 1);
-                curl_setopt($ch2, CURLOPT_SSL_VERIFYPEER, false);
-                curl_setopt($ch2, CURLOPT_SSL_VERIFYHOST, false);
-                curl_setopt($ch2, CURLOPT_FOLLOWLOCATION, true);
-                curl_setopt($ch2, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-                $recheckBody   = curl_exec($ch2);
-                $recheckStatus = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
-                $stillAlive    = ($recheckStatus === 200 &&
-                    ($recheckBody && str_contains($recheckBody, 'type="password"')));
-                if ($stillAlive) {
-                    writePortalLiveWindow();
-                }
-            }
-
-            if ($stillAlive && !\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down')) {
-                $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                $selfUrl  = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken);
-
-                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Spawning loopback: {$remainingJobs} jobs remain, portal still alive." . PHP_EOL, FILE_APPEND);
-                fireAsync($selfUrl);
-            } else {
-                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Portal went dead after queue:work — no loopback.' . PHP_EOL, FILE_APPEND);
-            }
-        }
-    } catch (\Throwable $dbEx) {
-        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Loopback check failed: ' . $dbEx->getMessage() . PHP_EOL, FILE_APPEND);
-    }
-
     http_response_code(200);
     header('Content-Type: text/plain');
-    echo '[' . date('Y-m-d H:i:s') . '] Queue worker cycle completed.' . PHP_EOL;
-    echo $outputText;
+    echo '[' . date('Y-m-d H:i:s') . "] Scheduler run completed. Spawned {$workersToSpawn} parallel queue workers." . PHP_EOL;
 
 } catch (\Throwable $e) {
     http_response_code(500);
