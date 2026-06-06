@@ -476,7 +476,7 @@ class EventController extends Controller
 
             // Clear the circuit breaker so sync attempts can proceed immediately.
             $this->forgetSharedValue('sre_circuit_breaker_portal_down');
-            $this->setSharedValue('sre_portal_is_alive', true, 300);
+            $this->setSharedValue('sre_portal_is_alive', true, 90); // Aligned to PortalHealthService::$aliveTtl (was 300s)
             $this->forgetSharedValue('auto_sync_paused');
             $this->forgetSharedValue('sre_consecutive_auth_failures');
             $this->forgetSharedValue('portal_credentials_invalid');
@@ -644,8 +644,8 @@ class EventController extends Controller
         if (!$isOnline && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true) {
             $liveWindow = $this->readPortalLiveWindow();
             if ($liveWindow !== null && (time() - $liveWindow) < 300) {
-                // Cron confirmed portal alive recently — restore the shared cache so probes skip
-                $this->setSharedValue('sre_portal_is_alive', true, 360);
+                // Aligned to PortalHealthService::$aliveTtl (90s) — was 360s causing 5-min silent window.
+                $this->setSharedValue('sre_portal_is_alive', true, 90);
                 $this->forgetSharedValue('sre_circuit_breaker_portal_down');
                 $isOnline = true;
                 Log::channel('sync')->info('Dashboard health check: portal_live_window hit — restoring online state.', [

@@ -176,7 +176,8 @@ class DashboardController extends Controller
         if (!$isOnline && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true) {
             $liveWindow = $this->readPortalLiveWindow();
             if ($liveWindow !== null && (time() - $liveWindow) < 300) {
-                $this->setSharedValue('sre_portal_is_alive', true, 360);
+                // Aligned to PortalHealthService::$aliveTtl (90s) — was 360s causing 5-min silent window.
+                $this->setSharedValue('sre_portal_is_alive', true, 90);
                 $this->forgetSharedValue('sre_circuit_breaker_portal_down');
                 $isOnline = true;
                 Log::channel('sync')->info('Dashboard health check: portal_live_window hit — restoring online state.', [

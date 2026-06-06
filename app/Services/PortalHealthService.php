@@ -19,16 +19,17 @@ class PortalHealthService
     /**
      * Hard probe timeout in seconds.
      * Portal must respond within this window or we treat it as down.
-     * Reduced from 90s → 12s: if the portal is alive it responds fast;
+     * 12s: if the portal is alive it responds fast;
      * a 90-second hang just wastes the entire cron window.
      */
-    protected int $timeout = 90;
+    protected int $timeout = 12;
 
     /**
      * How long (seconds) to trust a "portal is alive" result before re-probing.
-     * Reduced from 300s (5 min) → 10s so we detect outages within one scheduler tick.
+     * 90s: short enough to detect outages within 1-2 scheduler ticks (scheduler runs every 60s).
+     * Previously was accidentally set to 360s (6 min) — causing the 5-minute silent window.
      */
-    protected int $aliveTtl = 360;
+    protected int $aliveTtl = 90;
 
     /**
      * How long (seconds) the circuit breaker stays tripped before we retry.
@@ -113,7 +114,7 @@ class PortalHealthService
         try {
             $response = $client->get($this->loginUrl);
             $this->lastResponseTime = microtime(true) - $startTime;
-            $this->setSharedValue('sre_portal_response_time', $this->lastResponseTime, 600);
+            $this->setSharedValue('sre_portal_ping_time', $this->lastResponseTime, 600);
 
             if ($response->getStatusCode() !== 200) {
                 $this->forgetPortalLiveWindow();
@@ -161,7 +162,7 @@ class PortalHealthService
         } catch (Exception $e) {
             $this->forgetPortalLiveWindow();
             $this->lastResponseTime = microtime(true) - $startTime;
-            $this->setSharedValue('sre_portal_response_time', $this->lastResponseTime, 600);
+            $this->setSharedValue('sre_portal_ping_time', $this->lastResponseTime, 600);
             if (!$bypassCache) {
                 $this->tripCircuitBreaker($e->getMessage());
             }
@@ -215,8 +216,12 @@ class PortalHealthService
             return min(2, $maxSlots);
         }
 
-        // 2. Read the latest response time (default to 3.0s if not set)
-        $responseTime = (float) $this->getSharedValue('sre_portal_response_time', 3.0);
+        // 2. Read the latest response time, falling back to ping time, then to 3.0s
+        $responseTime = $this->getSharedValue('sre_portal_response_time');
+        if ($responseTime === null) {
+            $responseTime = $this->getSharedValue('sre_portal_ping_time', 3.0);
+        }
+        $responseTime = (float) $responseTime;
 
         if ($responseTime > 15.0) {
             return min(2, $maxSlots); // very slow/struggling

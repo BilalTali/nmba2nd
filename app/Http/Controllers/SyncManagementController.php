@@ -133,7 +133,7 @@ class SyncManagementController extends Controller
 
             // Clear all lock signals.
             $this->forgetSharedValue('sre_circuit_breaker_portal_down');
-            $this->setSharedValue('sre_portal_is_alive', true, 300);
+            $this->setSharedValue('sre_portal_is_alive', true, 90); // Aligned to PortalHealthService::$aliveTtl (was 300s)
             $this->forgetSharedValue('auto_sync_paused');
             $this->forgetSharedValue('sre_consecutive_auth_failures');
             $this->forgetSharedValue('portal_credentials_invalid');
