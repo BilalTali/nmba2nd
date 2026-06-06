@@ -425,6 +425,19 @@ try {
     forgetSharedValue('sre_circuit_breaker_portal_down');
     setSharedValue('sre_portal_is_alive', true, 360);
 
+    // BUG-1 EXTENSION: Also sweep stale transmission locks on the ONLINE path.
+    // Locks from a previous day's outage survive if the portal recovers before
+    // the next offline probe fires. A once-per-run sweep here costs microseconds
+    // and ensures slots are never permanently blocked by orphaned lock files.
+    $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+    foreach ($lockFiles as $slotLock) {
+        if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+            @unlink($slotLock);
+            file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Cleared stale transmission lock (online sweep): ' . basename($slotLock) . PHP_EOL, FILE_APPEND);
+        }
+    }
+
+
     // Run schedule:run (dispatches SyncBatchJobs for all pending events)
     $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
     $scheduleInput  = new \Symfony\Component\Console\Input\StringInput('schedule:run');
