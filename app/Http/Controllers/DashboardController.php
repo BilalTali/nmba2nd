@@ -185,6 +185,13 @@ class DashboardController extends Controller
             }
         }
 
+        // DEGRADED STATE: portal login responds but event submissions are failing (522/524).
+        // sre_portal_is_degraded is set by PortalHealthService::tripCircuitBreaker() with a
+        // 120s TTL — much longer than the 8s circuit breaker — so the dashboard reliably
+        // sees this state across multiple 15s health polls.
+        // It is cleared by SyncBatchJob when at least one event syncs successfully.
+        $isDegraded = $isOnline && $this->getSharedValue('sre_portal_is_degraded') === true;
+
         $isPaused           = $this->getSharedValue('auto_sync_paused', false);
         $credentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
@@ -193,7 +200,8 @@ class DashboardController extends Controller
             ? (int) ($cachedHealth['counts']['pending'] ?? 0)
             : Event::where('sync_status', 'pending')->count();
 
-        $responseTime = $isOnline ? 0.1 : 60.0;
+        // Telemetry: reflect true state — healthy=0.1s, degraded=2.0s, offline=60s
+        $responseTime = $isOnline ? ($isDegraded ? 2.0 : 0.1) : 60.0;
         $this->recordTelemetry($pendingCount, $responseTime, $isOnline);
         $telemetry = $this->getTelemetryHistory();
 
@@ -275,7 +283,7 @@ class DashboardController extends Controller
         }
 
         return response()->json([
-            'status'                     => 'online',
+            'status'                     => $isDegraded ? 'degraded' : 'online',
             'pending_count'              => $pendingCount,
             'triggered_sync'             => $triggeredSync,
             'auto_sync_paused'           => $isPaused,

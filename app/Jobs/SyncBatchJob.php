@@ -238,6 +238,12 @@ class SyncBatchJob implements ShouldQueue
 
                     $successCount++;
 
+                    // Clear degraded signal on first success — portal is actually
+                    // submitting events, so Degraded badge should return to Online.
+                    if ($successCount === 1) {
+                        $this->forgetSharedValue('sre_portal_is_degraded');
+                    }
+
                 } else {
                     $this->writeSyncLog($event, 'failure', null, 'Sync service returned false — portal did not confirm submission.');
                     $event->markFailed('Sync service returned false — portal did not confirm submission.');

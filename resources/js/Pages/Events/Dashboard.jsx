@@ -342,6 +342,11 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                             <h4 className="text-lg font-black tracking-tight mt-0.5 text-slate-100 font-outfit" style={{ fontFamily: "'Outfit', sans-serif" }}>
                                                 {healthState.status === 'probing' && 'Initializing active health probing...'}
                                                 {healthState.status === 'offline' && <span className="text-rose-400">Offline (Timeout or 522 Cloudflare Error)</span>}
+                                                {healthState.status === 'degraded' && (
+                                                    <span className="text-amber-400 font-bold">
+                                                        ⚠ Degraded — Login OK, submissions failing (522/524) · {healthState.pending_count} events queued
+                                                    </span>
+                                                )}
                                                 {healthState.status === 'online' && (
                                                     healthState.auto_sync_paused 
                                                         ? <span className="text-amber-400 font-bold">Online — Auto-Sync Paused ({healthState.pending_count} pending)</span>

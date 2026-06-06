@@ -186,5 +186,13 @@ class PortalHealthService
         // Deleting it here (on a transient 522 from a sync job session check) would destroy
         // the dashboard's fallback signal unnecessarily during brief circuit breaker cycles.
         $this->setSharedValue('sre_circuit_breaker_portal_down', true, $this->breakerTtl);
+
+        // DEGRADED STATE FIX: set a longer-lived signal so the dashboard can display
+        // "Degraded" for 2 minutes after the circuit breaker trips.
+        // The breaker itself only lasts 8s (to allow rapid retry), but sre_portal_is_degraded
+        // persists long enough for the dashboard health poll (every 15s) to reliably see it.
+        // Cleared when an event actually syncs successfully (see SyncBatchJob).
+        $this->setSharedValue('sre_portal_is_degraded', true, 120);
     }
+
 }
