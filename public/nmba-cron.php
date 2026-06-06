@@ -302,8 +302,9 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
 }
 
 if (!$portalIsAlive) {
-    // Portal is dead — immediately forget the live window and the local alive state
-    // so that the dashboard updates to Offline status instantly without cached delay.
+    // ── BUG-2 FIX: Portal is dead — delete shared file AND force-expire the
+    // Laravel cache key immediately so the dashboard flips to Offline within
+    // seconds instead of waiting up to 360s for the TTL to expire naturally.
     forgetPortalLiveWindow();
     forgetSharedValue('sre_portal_is_alive');
 
@@ -318,13 +319,19 @@ if (!$portalIsAlive) {
                 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
                 $kernel->bootstrap();
 
+                // BUG-2 FIX: Force-expire sre_portal_is_alive from the Laravel
+                // cache so checkPortalHealth() immediately sees false instead of
+                // reading the stale cached true value for up to 360 more seconds.
+                \Illuminate\Support\Facades\Cache::forget('sre_portal_is_alive');
+                \Illuminate\Support\Facades\Cache::put('sre_circuit_breaker_portal_down', true, 7200);
+
                 // Clear the default queue
                 \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'default')->delete();
 
                 // Reset all events currently marked 'syncing' back to 'pending'
                 \App\Models\Event::where('sync_status', 'syncing')
                     ->update([
-                        'sync_status' => 'pending',
+                        'sync_status'     => 'pending',
                         'last_attempt_at' => now(),
                     ]);
 
@@ -341,12 +348,39 @@ if (!$portalIsAlive) {
                     \Illuminate\Support\Facades\Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
                 }
 
+                // ── BUG-1 FIX: Clear stale transmission_lock_slot_*.lock files ──
+                // These 0-byte files are written when a slot starts transmitting and
+                // deleted when it finishes. If the portal drops mid-transmission the
+                // shutdown handler may never run, leaving stale lock files from
+                // previous days that prevent slot re-entry after recovery.
+                // Clear any lock file older than 15 minutes on every offline transition.
+                $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+                $staleCount = 0;
+                foreach ($lockFiles as $slotLock) {
+                    if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+                        @unlink($slotLock);
+                        $staleCount++;
+                    }
+                }
+                if ($staleCount > 0) {
+                    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Cron: Cleared {$staleCount} stale transmission lock file(s) on offline transition." . PHP_EOL, FILE_APPEND);
+                }
+
                 file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Queue sweep and dispatch locks cleared successfully.' . PHP_EOL, FILE_APPEND);
             }
         } catch (\Throwable $e) {
             file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Failed to sweep queue on offline transition: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
         }
         setSharedValue('sre_last_portal_was_offline', true, 7200);
+    } else {
+        // Portal already known offline — still clear stale lock files on every probe
+        // (without bootstrapping Laravel, as a lightweight file-only sweep).
+        $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+        foreach ($lockFiles as $slotLock) {
+            if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+                @unlink($slotLock);
+            }
+        }
     }
 
     $lockReleased = true;
