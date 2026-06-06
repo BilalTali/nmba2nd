@@ -202,7 +202,7 @@ class Kernel extends ConsoleKernel
         $slotIndex = 0;
         $dispatched = 0;
 
-        foreach ($dispatchable->chunk(20) as $batch) {
+        foreach ($dispatchable->chunk(10) as $batch) {
             if ($slotIndex >= $maxSlots) {
                 break;
             }
