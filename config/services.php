@@ -47,6 +47,7 @@ return [
 
     'sync' => [
         'max_slots' => (int) env('SYNC_MAX_SLOTS', 8),
+        'shared_dir' => env('SYNC_SHARED_DIR', '/home/u335000182/shared_sync'),
     ],
 
 ];

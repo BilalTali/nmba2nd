@@ -193,28 +193,33 @@ class Kernel extends ConsoleKernel
      * Extracted to a method so the cron script can also call it directly
      * without going through the full scheduler guard chain.
      *
+     * Each slot processes up to 20 events per sweep.
+     * Max throughput: 8 slots × 20 events = 160 events per scheduler sweep.
+     *
      * Returns the number of batch jobs dispatched.
      */
     protected function dispatchPendingBatches(): int
     {
-        // Query pending + zombie (stuck in syncing > 10 min) events
-        $events = Event::where(function ($q) {
-            $q->where(function ($query) {
-                $query->where('sync_status', 'pending')
-                      ->where(function ($inner) {
-                          $inner->whereNull('last_attempt_at')
-                                ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
-                      });
+        // BN-6 FIX: Select only the columns required for dispatch-eligibility
+        // checks. Avoids loading 30+ columns × 1,000 rows = unnecessary memory.
+        $events = Event::select(['id', 'sync_status', 'sync_attempts', 'last_attempt_at', 'updated_at', 'created_at'])
+            ->where(function ($q) {
+                $q->where(function ($query) {
+                    $query->where('sync_status', 'pending')
+                          ->where(function ($inner) {
+                              $inner->whereNull('last_attempt_at')
+                                    ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
+                          });
+                })
+                ->orWhere(function ($query) {
+                    $query->where('sync_status', 'syncing')
+                          ->where('updated_at', '<', now()->subMinutes(10));
+                });
             })
-            ->orWhere(function ($query) {
-                $query->where('sync_status', 'syncing')
-                      ->where('updated_at', '<', now()->subMinutes(10));
-            });
-        })
-        ->whereBetween('sync_attempts', [0, 9])
-        ->orderBy('created_at', 'asc')
-        ->limit(1000)
-        ->get();
+            ->whereBetween('sync_attempts', [0, 9])
+            ->orderBy('created_at', 'asc')
+            ->limit(1000)
+            ->get();
 
         if ($events->isEmpty()) {
             return 0;
@@ -238,7 +243,9 @@ class Kernel extends ConsoleKernel
         $slotIndex = 0;
         $dispatched = 0;
 
-        foreach ($dispatchable->chunk(10) as $batch) {
+        // BN-9 FIX: chunk(20) doubles per-sweep throughput vs old chunk(10).
+        // SyncBatchJob timeout is 600s (10 min) — safely covers 20 × ~30s each.
+        foreach ($dispatchable->chunk(20) as $batch) {
             if ($slotIndex >= $maxSlots) {
                 break;
             }

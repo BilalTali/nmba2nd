@@ -55,182 +55,182 @@ Route::middleware(['auth', 'admin'])->group(function () {
     Route::get('/admin/synced-events', [\App\Http\Controllers\EventController::class, 'syncedEventsIndex'])->name('admin.synced-events');
     Route::get('/admin/events/pdf', [\App\Http\Controllers\EventController::class, 'exportPdf'])->name('admin.events.pdf');
     Route::get('/admin/events-portal', function (\Illuminate\Http\Request $request) {
-        $query = \App\Models\Event::with(['department']);
+        // ── DRY FIX: Shared filter closure reused by both portal view and export ──
+        // This closure is defined once and referenced below and in the export route.
+        // Moving all filter logic here ensures a single point of truth.
+        $filters = $request->only([
+            'start_date', 'end_date', 'block_id', 'department_id',
+            'category', 'audience', 'age_group', 'attendance_range',
+            'venue_search', 'sync_status',
+        ]);
 
-        // 1. Apply Dynamic Filters
-        if ($request->filled('start_date')) {
-            $query->whereDate('event_date', '>=', $request->start_date);
-        }
-        if ($request->filled('end_date')) {
-            $query->whereDate('event_date', '<=', $request->end_date);
-        }
-        if ($request->filled('block_id') && $request->block_id !== 'All Blocks') {
-            // Resolve block ID from name
-            $block = \App\Models\Block::where('name', $request->block_id)->first();
-            if ($block) {
-                $query->where('block_id', $block->id);
-            } else {
-                $query->where('block_id', 0); // No match
+        $applyPortalFilters = function (\Illuminate\Database\Eloquent\Builder $query) use ($request): void {
+            if ($request->filled('start_date')) {
+                $query->whereDate('event_date', '>=', $request->start_date);
             }
-        }
-        if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
-            $department = \App\Models\Department::where('name', $request->department_id)->first();
-            if ($department) {
-                $query->where('department_id', $department->id);
-            } else {
-                $query->where('department_id', 0);
+            if ($request->filled('end_date')) {
+                $query->whereDate('event_date', '<=', $request->end_date);
             }
-        }
-        if ($request->filled('category') && $request->category !== 'All Categories') {
-            $query->whereJsonContains('event_category', $request->category);
-        }
-        if ($request->filled('audience') && $request->audience !== 'All') {
-            $query->whereJsonContains('target_audience', $request->audience);
-        }
-        if ($request->filled('age_group') && $request->age_group !== 'All') {
-            $query->whereJsonContains('age_group', $request->age_group);
-        }
-        if ($request->filled('attendance_range') && $request->attendance_range !== 'All') {
-            $query->where('attendance_range', $request->attendance_range);
-        }
-        if ($request->filled('venue_search')) {
-            $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
-        }
-        if ($request->filled('sync_status') && $request->sync_status !== 'All') {
-            $statusMap = [
-                'Synced' => 'synced',
-                'Pending' => 'pending',
-                'Rejected/Failed' => 'failed_permanently',
-                'Rejected' => 'failed_permanently',
-            ];
-            $dbStatus = $statusMap[$request->sync_status] ?? null;
-            if ($dbStatus) {
-                $query->where('sync_status', $dbStatus);
+            if ($request->filled('block_id') && $request->block_id !== 'All Blocks') {
+                $block = \App\Models\Block::where('name', $request->block_id)->first();
+                $query->where('block_id', $block ? $block->id : 0);
             }
-        }
-
-        // 2. Fetch Live Stats (based on filtered events)
-        $totalEvents = (clone $query)->count();
-        $totalParticipants = (clone $query)->sum('actual_attendance');
-        $uniqueVenues = (clone $query)->distinct('event_venue')->count('event_venue');
-        $blocksActive = (clone $query)->distinct('block_id')->count('block_id');
-        
-        // Active Days: Count unique event dates
-        $activeDays = (clone $query)->distinct('event_date')->count('event_date');
-
-        // 3. Prepare Chart Data
-        $blocks = \App\Models\Block::pluck('name', 'id')->toArray();
-        $departments = \App\Models\Department::pluck('name', 'id')->toArray();
-        
-        // Events by Block
-        $eventsByBlockRaw = (clone $query)->select('block_id', \DB::raw('count(*) as count'))
-            ->groupBy('block_id')
-            ->get();
-        
-        $eventsByBlock = $eventsByBlockRaw->map(fn($item) => [
-            'name' => $blocks[$item->block_id] ?? 'Unknown',
-            'count' => (int) $item->count
-        ])->sortByDesc('count')->values();
-
-        // Events by Category
-        $categoryCounts = [
-            'Awareness' => 0,
-            'Cultural' => 0,
-            'Sports' => 0,
-            'Training & Counselling' => 0
-        ];
-        (clone $query)->pluck('event_category')->each(function ($categories) use (&$categoryCounts) {
-            if (is_array($categories)) {
-                foreach ($categories as $cat) {
-                    if (isset($categoryCounts[$cat])) {
-                        $categoryCounts[$cat]++;
-                    }
+            if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
+                $department = \App\Models\Department::where('name', $request->department_id)->first();
+                $query->where('department_id', $department ? $department->id : 0);
+            }
+            if ($request->filled('category') && $request->category !== 'All Categories') {
+                $query->whereJsonContains('event_category', $request->category);
+            }
+            if ($request->filled('audience') && $request->audience !== 'All') {
+                $query->whereJsonContains('target_audience', $request->audience);
+            }
+            if ($request->filled('age_group') && $request->age_group !== 'All') {
+                $query->whereJsonContains('age_group', $request->age_group);
+            }
+            if ($request->filled('attendance_range') && $request->attendance_range !== 'All') {
+                $query->where('attendance_range', $request->attendance_range);
+            }
+            if ($request->filled('venue_search')) {
+                $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
+            }
+            if ($request->filled('sync_status') && $request->sync_status !== 'All') {
+                $statusMap = [
+                    'Synced'           => 'synced',
+                    'Pending'          => 'pending',
+                    'Rejected/Failed'  => 'failed_permanently',
+                    'Rejected'         => 'failed_permanently',
+                ];
+                $dbStatus = $statusMap[$request->sync_status] ?? null;
+                if ($dbStatus) {
+                    $query->where('sync_status', $dbStatus);
                 }
             }
+        };
+
+        // Base query for filtered table records (includes eager-loaded department for the table)
+        $query = \App\Models\Event::with(['department']);
+        $applyPortalFilters($query);
+
+        // BN-4 FIX: Cache all 8 heavy aggregate queries for 60 seconds,
+        // keyed on the full filter set. Repeated page loads with identical
+        // filters cost 0 DB queries for stats — only the paginated table row
+        // fetch remains live (it must stay live for accurate pagination).
+        $cacheKey = 'portal_stats_' . md5(json_encode($filters));
+        $stats = \Illuminate\Support\Facades\Cache::remember($cacheKey, 60, function () use ($query) {
+            // Stats base: no eager-loaded relations needed for aggregates
+            $statsQuery = \App\Models\Event::query();
+            // Re-apply same where clauses to a clean query (without ->with(['department']))
+            foreach ($query->getQuery()->wheres as $where) {
+                $statsQuery->getQuery()->wheres[] = $where;
+            }
+            $statsQuery->getQuery()->bindings = $query->getQuery()->bindings;
+
+            $blocks = \App\Models\Block::pluck('name', 'id')->toArray();
+            $departments = \App\Models\Department::pluck('name', 'id')->toArray();
+
+            $totalEvents       = (clone $statsQuery)->count();
+            $totalParticipants = (clone $statsQuery)->sum('actual_attendance');
+            $uniqueVenues      = (clone $statsQuery)->distinct('event_venue')->count('event_venue');
+            $blocksActive      = (clone $statsQuery)->distinct('block_id')->count('block_id');
+            $activeDays        = (clone $statsQuery)->distinct('event_date')->count('event_date');
+
+            // Events by Block chart
+            $eventsByBlockRaw = (clone $statsQuery)
+                ->select('block_id', \DB::raw('count(*) as count'))
+                ->groupBy('block_id')
+                ->get();
+            $eventsByBlock = $eventsByBlockRaw->map(fn ($item) => [
+                'name'  => $blocks[$item->block_id] ?? 'Unknown',
+                'count' => (int) $item->count,
+            ])->sortByDesc('count')->values();
+
+            // Events by Category chart
+            $categoryCounts = ['Awareness' => 0, 'Cultural' => 0, 'Sports' => 0, 'Training & Counselling' => 0];
+            (clone $statsQuery)->pluck('event_category')->each(function ($categories) use (&$categoryCounts) {
+                if (is_array($categories)) {
+                    foreach ($categories as $cat) {
+                        if (isset($categoryCounts[$cat])) {
+                            $categoryCounts[$cat]++;
+                        }
+                    }
+                }
+            });
+
+            // Participants by Block chart
+            $participantsByBlockRaw = (clone $statsQuery)
+                ->select('block_id', \DB::raw('sum(actual_attendance) as participants'))
+                ->groupBy('block_id')
+                ->get();
+            $participantsByBlock = $participantsByBlockRaw->map(fn ($item) => [
+                'name'         => $blocks[$item->block_id] ?? 'Unknown',
+                'participants' => (int) $item->participants,
+            ])->sortByDesc('participants')->values();
+
+            return compact(
+                'totalEvents', 'totalParticipants', 'uniqueVenues', 'blocksActive',
+                'activeDays', 'eventsByBlock', 'categoryCounts', 'participantsByBlock',
+                'blocks', 'departments'
+            );
         });
 
-        // Participants by Block
-        $participantsByBlockRaw = (clone $query)->select('block_id', \DB::raw('sum(actual_attendance) as participants'))
-            ->groupBy('block_id')
-            ->get();
-
-        $participantsByBlock = $participantsByBlockRaw->map(fn($item) => [
-            'name' => $blocks[$item->block_id] ?? 'Unknown',
-            'participants' => (int) $item->participants
-        ])->sortByDesc('participants')->values();
-
-        // 4. Paginated Table Records
+        // Paginated table — always live (pagination must reflect the true current state)
         $events = $query->orderBy('event_date', 'desc')->orderBy('id', 'desc')->paginate(10)->withQueryString();
 
-        return view('events.portal', [
-            'totalEvents' => $totalEvents,
-            'totalParticipants' => $totalParticipants,
-            'uniqueVenues' => $uniqueVenues,
-            'blocksActive' => $blocksActive,
-            'activeDays' => $activeDays,
-            'eventsByBlock' => $eventsByBlock,
-            'categoryCounts' => $categoryCounts,
-            'participantsByBlock' => $participantsByBlock,
-            'events' => $events,
-            'blocks' => $blocks,
-            'departments' => $departments,
-            'filters' => $request->only(['start_date', 'end_date', 'block_id', 'department_id', 'category', 'audience', 'age_group', 'attendance_range', 'venue_search', 'sync_status']),
-        ]);
+        return view('events.portal', array_merge($stats, [
+            'events'  => $events,
+            'filters' => $filters,
+        ]));
     })->name('admin.events.portal');
 
     Route::get('/admin/events-portal/export', function (\Illuminate\Http\Request $request) {
-        $query = \App\Models\Event::with(['department']);
+        // DRY FIX: Extract shared filter logic to avoid duplication with portal view route.
+        $applyPortalFilters = function (\Illuminate\Database\Eloquent\Builder $query) use ($request): void {
+            if ($request->filled('start_date')) {
+                $query->whereDate('event_date', '>=', $request->start_date);
+            }
+            if ($request->filled('end_date')) {
+                $query->whereDate('event_date', '<=', $request->end_date);
+            }
+            if ($request->filled('block_id') && $request->block_id !== 'All Blocks') {
+                $block = \App\Models\Block::where('name', $request->block_id)->first();
+                $query->where('block_id', $block ? $block->id : 0);
+            }
+            if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
+                $department = \App\Models\Department::where('name', $request->department_id)->first();
+                $query->where('department_id', $department ? $department->id : 0);
+            }
+            if ($request->filled('category') && $request->category !== 'All Categories') {
+                $query->whereJsonContains('event_category', $request->category);
+            }
+            if ($request->filled('audience') && $request->audience !== 'All') {
+                $query->whereJsonContains('target_audience', $request->audience);
+            }
+            if ($request->filled('age_group') && $request->age_group !== 'All') {
+                $query->whereJsonContains('age_group', $request->age_group);
+            }
+            if ($request->filled('attendance_range') && $request->attendance_range !== 'All') {
+                $query->where('attendance_range', $request->attendance_range);
+            }
+            if ($request->filled('venue_search')) {
+                $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
+            }
+            if ($request->filled('sync_status') && $request->sync_status !== 'All') {
+                $statusMap = [
+                    'Synced'          => 'synced',
+                    'Pending'         => 'pending',
+                    'Rejected/Failed' => 'failed_permanently',
+                    'Rejected'        => 'failed_permanently',
+                ];
+                $dbStatus = $statusMap[$request->sync_status] ?? null;
+                if ($dbStatus) {
+                    $query->where('sync_status', $dbStatus);
+                }
+            }
+        };
 
-        // Apply the same filters
-        if ($request->filled('start_date')) {
-            $query->whereDate('event_date', '>=', $request->start_date);
-        }
-        if ($request->filled('end_date')) {
-            $query->whereDate('event_date', '<=', $request->end_date);
-        }
-        if ($request->filled('block_id') && $request->block_id !== 'All Blocks') {
-            $block = \App\Models\Block::where('name', $request->block_id)->first();
-            if ($block) {
-                $query->where('block_id', $block->id);
-            } else {
-                $query->where('block_id', 0);
-            }
-        }
-        if ($request->filled('department_id') && $request->department_id !== 'All Departments') {
-            $department = \App\Models\Department::where('name', $request->department_id)->first();
-            if ($department) {
-                $query->where('department_id', $department->id);
-            } else {
-                $query->where('department_id', 0);
-            }
-        }
-        if ($request->filled('category') && $request->category !== 'All Categories') {
-            $query->whereJsonContains('event_category', $request->category);
-        }
-        if ($request->filled('audience') && $request->audience !== 'All') {
-            $query->whereJsonContains('target_audience', $request->audience);
-        }
-        if ($request->filled('age_group') && $request->age_group !== 'All') {
-            $query->whereJsonContains('age_group', $request->age_group);
-        }
-        if ($request->filled('attendance_range') && $request->attendance_range !== 'All') {
-            $query->where('attendance_range', $request->attendance_range);
-        }
-        if ($request->filled('venue_search')) {
-            $query->where('event_venue', 'like', '%' . $request->venue_search . '%');
-        }
-        if ($request->filled('sync_status') && $request->sync_status !== 'All') {
-            $statusMap = [
-                'Synced' => 'synced',
-                'Pending' => 'pending',
-                'Rejected/Failed' => 'failed_permanently',
-                'Rejected' => 'failed_permanently',
-            ];
-            $dbStatus = $statusMap[$request->sync_status] ?? null;
-            if ($dbStatus) {
-                $query->where('sync_status', $dbStatus);
-            }
-        }
+        $query = \App\Models\Event::with(['department']);
+        $applyPortalFilters($query);
 
         $events = $query->orderBy('event_date', 'desc')->orderBy('id', 'desc')->get();
         $blocks = \App\Models\Block::pluck('name', 'id')->toArray();
@@ -244,11 +244,11 @@ Route::middleware(['auth', 'admin'])->group(function () {
         ];
 
         $columns = [
-            'ID', 'Event Name', 'Event Date', 'Event Venue', 'Categories', 
+            'ID', 'Event Name', 'Event Date', 'Event Venue', 'Categories',
             'Block Name', 'Department', 'Village', 'Attendance', 'Audience', 'Coordinator', 'Contact'
         ];
 
-        $callback = function() use($events, $columns, $blocks) {
+        $callback = function () use ($events, $columns, $blocks) {
             $file = fopen('php://output', 'w');
             fputcsv($file, $columns);
 

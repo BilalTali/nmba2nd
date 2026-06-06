@@ -641,7 +641,7 @@ class EventController extends Controller
         // portal_live_window.json), trust it even if sre_portal_is_alive has expired.
         // This prevents the dashboard from flipping to "Offline" when the cron hits a
         // transient 522 and doesn't refresh the signal for a few minutes.
-        if (!$isOnline) {
+        if (!$isOnline && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true) {
             $liveWindow = $this->readPortalLiveWindow();
             if ($liveWindow !== null && (time() - $liveWindow) < 300) {
                 // Cron confirmed portal alive recently — restore the shared cache so probes skip
@@ -657,7 +657,13 @@ class EventController extends Controller
         $isPaused = $this->getSharedValue('auto_sync_paused', false);
         $credentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
-        $pendingCount = Event::where('sync_status', 'pending')->count();
+        // BN-7 FIX: Reuse the 30s dashboard_metrics_counts cache populated by dashboard().
+        // This endpoint is polled every 15s — a live COUNT on every poll is expensive.
+        // Fall back to a live query only when the cache is cold (first poll after boot).
+        $cachedHealth = Cache::get('dashboard_metrics_counts');
+        $pendingCount = $cachedHealth
+            ? (int) ($cachedHealth['counts']['pending'] ?? 0)
+            : Event::where('sync_status', 'pending')->count();
 
         // Record system telemetry
         $responseTime = $isOnline ? 0.1 : 60.0;

@@ -145,24 +145,30 @@ class HttpPortalSyncService implements PortalSyncInterface
 
     protected function buildClient(CookieJar $cookieJar): Client
     {
-        // Fetch the last known response time of the portal (default 55.0 seconds —
-        // the portal is known to take 47-50s to respond under load).
+        // Fetch the last known response time of the portal.
+        // Default 55s — the portal is observed to take 47-50s under load.
         $lastResponseTime = (float) Cache::get('sre_portal_response_time', 55.0);
 
-        // Never shrink below 55s (the portal's observed baseline under load).
-        $effectiveResponseTime = max(55.0, $lastResponseTime);
+        // BN-2 FIX: Floor reduced 55 → 35s.
+        // Rationale: as the portal stabilises and sre_portal_response_time
+        // reflects real observed times, this allows the calculated timeout to
+        // shrink proportionally instead of being artificially floored at 120s.
+        $effectiveResponseTime = max(35.0, $lastResponseTime);
 
-        // Dynamic timeout: response time × 3, clamped to [120s, 150s].
-        // 120s floor: gives a full 70s margin above the observed 50s response time.
-        // 150s ceiling: prevents a single request from holding up the job for too long.
+        // Dynamic timeout: response time × 3, clamped to [105s, 150s].
+        // 105s floor: gives a 70s margin above a 35s baseline response.
+        // 150s ceiling: prevents a single request holding up the job too long.
         $calculatedTimeout = (int) ceil($effectiveResponseTime * 3);
-        $timeout = max(120, min(150, $calculatedTimeout));
+        $timeout = max(105, min(150, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
             'cookies'         => $cookieJar,
             'timeout'         => $timeout,
-            'connect_timeout' => 45,  // Portal DNS/TCP is slow — allow 45s to establish
+            // BN-2 FIX: connect_timeout reduced 45s → 10s.
+            // TCP connection either completes in < 5s or the host is unreachable.
+            // A 45s connect stall wastes the entire scheduler tick with no benefit.
+            'connect_timeout' => 10,
             'read_timeout'    => $timeout,
             'allow_redirects' => ['max' => 10, 'strict' => false, 'track_redirects' => false],
             'headers'         => [

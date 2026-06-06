@@ -455,4 +455,162 @@ class SyncQueueConnectionTest extends TestCase
         $response->assertStatus(302);
         $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
     }
+
+    /** @test */
+    public function check_portal_credentials_command_sets_invalid_credentials_cache_flag_on_failure(): void
+    {
+        // Mock the Guzzle Client
+        $mockClient = \Mockery::mock(\GuzzleHttp\Client::class);
+        
+        // Mock Step 1: GET login page and return CSRF token
+        $mockClient->shouldReceive('get')
+            ->once()
+            ->andReturn(new \GuzzleHttp\Psr7\Response(200, [], '<input name="_token" value="test_token" />'));
+
+        // Mock Step 2: POST credentials and return a body WITHOUT logout/dashboard keywords (failure)
+        $mockClient->shouldReceive('post')
+            ->once()
+            ->andReturn(new \GuzzleHttp\Psr7\Response(200, [], '<html><input type="password" />Login failed</html>'));
+
+        // Bind the mock to the container so app(Client::class) returns it
+        $this->app->instance(\GuzzleHttp\Client::class, $mockClient);
+
+        // Configure credentials in config so the command runs
+        config(['services.portal.url' => 'https://nashamuktjk.org']);
+        config(['services.portal.email' => 'admin@test.com']);
+        config(['services.portal.password' => 'secret123']);
+
+        // Ensure flags are false initially
+        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
+        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('auto_sync_paused'));
+
+        // Run the command
+        $this->artisan('portal:check-credentials');
+
+        // Assert flags are set on failure
+        $this->assertTrue(\Illuminate\Support\Facades\Cache::get('portal_credentials_invalid'));
+        $this->assertTrue(\Illuminate\Support\Facades\Cache::get('auto_sync_paused'));
+    }
+
+    /** @test */
+    public function check_portal_credentials_command_clears_invalid_credentials_cache_flag_on_success(): void
+    {
+        // Mock the Guzzle Client
+        $mockClient = \Mockery::mock(\GuzzleHttp\Client::class);
+        
+        // Mock Step 1: GET login page and return CSRF token
+        $mockClient->shouldReceive('get')
+            ->once()
+            ->andReturn(new \GuzzleHttp\Psr7\Response(200, [], '<input name="_token" value="test_token" />'));
+
+        // Mock Step 2: POST credentials and return a body WITH logout/dashboard keywords (success)
+        $mockClient->shouldReceive('post')
+            ->once()
+            ->andReturn(new \GuzzleHttp\Psr7\Response(200, [], '<html>Dashboard Sign Out</html>'));
+
+        // Bind the mock to the container
+        $this->app->instance(\GuzzleHttp\Client::class, $mockClient);
+
+        // Configure credentials in config
+        config(['services.portal.url' => 'https://nashamuktjk.org']);
+        config(['services.portal.email' => 'admin@test.com']);
+        config(['services.portal.password' => 'secret123']);
+
+        // Set flags initially to true
+        \Illuminate\Support\Facades\Cache::put('portal_credentials_invalid', true);
+        \Illuminate\Support\Facades\Cache::put('sre_consecutive_auth_failures', 5);
+
+        // Run the command
+        $this->artisan('portal:check-credentials');
+
+        // Assert flags are cleared on success
+        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('portal_credentials_invalid'));
+        $this->assertFalse(\Illuminate\Support\Facades\Cache::has('sre_consecutive_auth_failures'));
+    }
+
+    /** @test */
+    public function check_portal_health_route_does_not_override_circuit_breaker_when_active(): void
+    {
+        $block = Block::create([
+            'id'          => 1,
+            'name'        => 'Test Block',
+            'slug'        => 'test-block',
+            'district_id' => 1,
+        ]);
+
+        $admin = \App\Models\User::factory()->create(['role' => 'admin', 'block_id' => $block->id]);
+
+        // Create temporary directory for shared sync files
+        $tempDir = sys_get_temp_dir() . '/shared_sync_test_' . uniqid();
+        mkdir($tempDir, 0777, true);
+
+        config(['services.sync.shared_dir' => $tempDir]);
+
+        // Create a simulated portal_live_window (confirmed alive 10 seconds ago)
+        file_put_contents($tempDir . '/portal_live_window.json', json_encode([
+            'probed_at' => time() - 10,
+            'site' => 'test.com',
+        ]));
+
+        // Trip local circuit breaker (breaker active)
+        \Illuminate\Support\Facades\Cache::put('sre_circuit_breaker_portal_down', true, 60);
+        \Illuminate\Support\Facades\Cache::forget('sre_portal_is_alive');
+
+        // Health check should return offline because circuit breaker is active,
+        // and it should NOT clear the circuit breaker.
+        $response = $this->actingAs($admin)->get(route('events.check-portal'));
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('status', 'offline');
+
+        // Circuit breaker should still be active in cache
+        $this->assertTrue(\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down'));
+
+        // Clean up temp directory
+        @unlink($tempDir . '/portal_live_window.json');
+        @rmdir($tempDir);
+    }
+
+    /** @test */
+    public function check_portal_health_route_applies_fallback_when_circuit_breaker_is_not_active(): void
+    {
+        $block = Block::create([
+            'id'          => 1,
+            'name'        => 'Test Block',
+            'slug'        => 'test-block',
+            'district_id' => 1,
+        ]);
+
+        $admin = \App\Models\User::factory()->create(['role' => 'admin', 'block_id' => $block->id]);
+
+        // Create temporary directory for shared sync files
+        $tempDir = sys_get_temp_dir() . '/shared_sync_test_' . uniqid();
+        mkdir($tempDir, 0777, true);
+
+        config(['services.sync.shared_dir' => $tempDir]);
+
+        // Create a simulated portal_live_window (confirmed alive 10 seconds ago)
+        file_put_contents($tempDir . '/portal_live_window.json', json_encode([
+            'probed_at' => time() - 10,
+            'site' => 'test.com',
+        ]));
+
+        // Ensure no circuit breaker is active and portal alive cache is expired
+        \Illuminate\Support\Facades\Cache::forget('sre_circuit_breaker_portal_down');
+        \Illuminate\Support\Facades\Cache::forget('sre_portal_is_alive');
+
+        // Health check should return online because live window is fresh,
+        // and it should restore the online status.
+        $response = $this->actingAs($admin)->get(route('events.check-portal'));
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('status', 'online');
+
+        // It should restore the portal is alive cache flag
+        $this->assertTrue(\Illuminate\Support\Facades\Cache::get('sre_portal_is_alive'));
+
+        // Clean up temp directory
+        @unlink($tempDir . '/portal_live_window.json');
+        @rmdir($tempDir);
+    }
 }

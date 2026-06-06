@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Log;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
 use Symfony\Component\DomCrawler\Crawler;
+use App\Traits\SharedCacheTrait;
 
 /**
  * FIX-SEC-02: Portal credential health-check command.
@@ -21,6 +22,8 @@ use Symfony\Component\DomCrawler\Crawler;
  */
 class CheckPortalCredentials extends Command
 {
+    use SharedCacheTrait;
+
     protected $signature = 'portal:check-credentials
                             {--quiet-on-success : Suppress output if credentials are valid}';
 
@@ -45,7 +48,7 @@ class CheckPortalCredentials extends Command
 
         try {
             $cookieJar = new CookieJar();
-            $client = new Client([
+            $client = app()->bound(Client::class) ? app(Client::class) : new Client([
                 'cookies'         => $cookieJar,
                 'timeout'         => 15,
                 'connect_timeout' => 10,
@@ -87,6 +90,8 @@ class CheckPortalCredentials extends Command
             if ($isAuth) {
                 $message = "SUCCESS — Portal credentials are valid. ({$email})";
                 $this->writeLog('SUCCESS', $message);
+                $this->forgetSharedValue('portal_credentials_invalid');
+                $this->forgetSharedValue('sre_consecutive_auth_failures');
 
                 if (!$this->option('quiet-on-success')) {
                     $this->info("✓ {$message}");
@@ -97,6 +102,8 @@ class CheckPortalCredentials extends Command
             // Authentication did not produce an authenticated session
             $message = "FAILURE — Portal rejected credentials. ({$email}) — Portal may have changed or password is wrong.";
             $this->writeLog('FAILURE', $message);
+            $this->setSharedValue('portal_credentials_invalid', true, 7200);
+            $this->setSharedValue('auto_sync_paused', true, 7200);
             $this->error("✗ {$message}");
             return self::FAILURE;
 

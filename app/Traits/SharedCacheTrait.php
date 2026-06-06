@@ -13,7 +13,7 @@ trait SharedCacheTrait
      */
     protected function getSharedDir(): string
     {
-        return '/home/u335000182/shared_sync';
+        return config('services.sync.shared_dir') ?: '/home/u335000182/shared_sync';
     }
 
     /**
