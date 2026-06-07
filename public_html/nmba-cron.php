@@ -109,13 +109,23 @@ if (($_GET['run_worker'] ?? '') === 'true') {
         $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
         $kernel->bootstrap();
 
-        // Run queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty
+        // THROUGHPUT FIX: max-time raised 15→50s so each worker processes a full
+        // 5-event batch (~45s) instead of stopping after 1 event.
+        // timeout raised 30→60s: a 5-event SyncBatchJob runs ~45s; 30s was too tight.
         $output = new \Symfony\Component\Console\Output\BufferedOutput();
-        $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=15 --tries=10 --timeout=30 --stop-when-empty');
+        $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=50 --tries=10 --timeout=60 --stop-when-empty');
         $exitCode   = $kernel->handle($input, $output);
         $outputText = $output->fetch();
 
         file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Async Worker Exit Code: ' . $exitCode . PHP_EOL . $outputText . PHP_EOL, FILE_APPEND);
+
+        // CHAIN FIX: refresh portal_live_window.json BEFORE checking age.
+        // Without this, the live_window written at cron-start is already 45s+ old
+        // when the first worker finishes — causing liveWindowAge >= 15 and killing
+        // the entire chain after just 1 cycle (1 batch = 5 events).
+        // Refreshing here keeps the chain alive for the full 5-min cron window:
+        //   8 chains × 5 events × 6 cycles = 240 events per 5-min window.
+        writePortalLiveWindow();
 
         // Check if there are still jobs in the queue, and if the portal is alive.
         // If so, spawn another async worker loopback!
@@ -127,13 +137,18 @@ if (($_GET['run_worker'] ?? '') === 'true') {
 
         if ($remainingJobs > 0) {
             $liveWindowAge = readPortalLiveWindowAge();
-            $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 15);
+            // CHAIN FIX: threshold raised 15→90s. Previously the check fired AFTER
+            // a 45s worker run, so age was already 45s+ and the chain always died.
+            // Now we refresh live_window above (age ~0) and use a 90s window for safety.
+            $stillAlive    = ($liveWindowAge !== null && $liveWindowAge < 90);
             if ($stillAlive && !\Illuminate\Support\Facades\Cache::get('sre_circuit_breaker_portal_down')) {
                 $host     = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';
                 $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
                 $selfUrl  = $protocol . '://' . $host . '/nmba-cron.php?token=' . urlencode($cronToken) . '&run_worker=true';
                 file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Spawning replacement worker: {$remainingJobs} jobs remain." . PHP_EOL, FILE_APPEND);
                 fireAsync($selfUrl);
+            } else {
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Chain stop: liveWindowAge={$liveWindowAge}s remaining={$remainingJobs} — portal may be down." . PHP_EOL, FILE_APPEND);
             }
         }
 
