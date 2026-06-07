@@ -51,7 +51,7 @@ remote "echo 'SSH OK'" >/dev/null && ok "SSH connection established." || fail "C
 
 # STEP 2 — Pull latest code from GitHub
 log "Step 2/10 — Pulling latest code from GitHub..."
-remote "cd $APP_DIR && git stash && git pull origin main 2>&1"
+remote "cd $APP_DIR && git stash && git clean -fd && git pull origin main 2>&1"
 remote "mkdir -p $APP_DIR/../public_html && cp $APP_DIR/public_html/nmba-cron.php $APP_DIR/../public_html/nmba-cron.php"
 sshpass -p "$SSH_PASS" scp -P "$SSH_PORT" -o StrictHostKeyChecking=no auto_sync_to_ctet.sh "$SSH_USER@$SSH_HOST:$APP_DIR/auto_sync_to_ctet.sh"
 sshpass -p "$SSH_PASS" scp -P "$SSH_PORT" -o StrictHostKeyChecking=no auto_sync_db.php "$SSH_USER@$SSH_HOST:$APP_DIR/auto_sync_db.php"
