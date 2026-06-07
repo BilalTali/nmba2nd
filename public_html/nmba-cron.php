@@ -267,13 +267,13 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
     $probedDirectly = false;
     file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: cross-site live window hit (age ' . $liveWindowAge . 's) — skipping own probe.' . PHP_EOL, FILE_APPEND);
 } else {
-    // Probe directly — 90s timeout, no cache (resilient to portal slowness)
+    // Probe directly — 20s timeout, no cache (prevents LSAPI process kills on slow portal responses)
     $probedDirectly = true;
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $portalUrl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 90);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
     curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
@@ -340,6 +340,8 @@ if (!$portalIsAlive) {
                 for ($i = 0; $i < 8; $i++) {
                     \Illuminate\Support\Facades\Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
                 }
+
+                \Illuminate\Support\Facades\Cache::put('sre_site_was_offline', true, 7200);
 
                 file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Queue sweep and dispatch locks cleared successfully.' . PHP_EOL, FILE_APPEND);
             }

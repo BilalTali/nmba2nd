@@ -129,8 +129,20 @@ class SyncBatchJob implements ShouldQueue
         $successCount    = 0;
         $failureCount    = 0;
         $processedIds    = []; // tracks events we started processing (for lock cleanup)
+        $batchStartTime  = microtime(true);
 
         foreach ($this->eventIds as $eventId) {
+            // Guard: Stop mid-batch if running too long (prevents LSAPI process kills).
+            // LiteSpeed kills processes at 90s, so we stop at 35s.
+            if (microtime(true) - $batchStartTime > 35.0) {
+                $unprocessedIds = array_diff($this->eventIds, $processedIds);
+                foreach ($unprocessedIds as $unprocessedId) {
+                    Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
+                }
+                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Approaching LiteSpeed timeout limit. Halting remaining events.");
+                break;
+            }
+
             // Guard: Stop mid-batch if circuit breaker tripped.
             // IMPORTANT: clear dispatch locks for all events we haven't touched yet,
             // so the next scheduler sweep (after the 8s circuit breaker cooldown)
@@ -209,9 +221,9 @@ class SyncBatchJob implements ShouldQueue
                     Cache::forget('sre_consecutive_auth_failures');
                     $this->forgetSharedValue('sre_consecutive_portal_failures');
 
-                    // Update response time in shared cache
+                    // Update response time in shared cache (2 min TTL to adapt quickly to portal latency changes)
                     $durationSeconds = $durationMs / 1000.0;
-                    $this->setSharedValue('sre_portal_response_time', $durationSeconds, 600);
+                    $this->setSharedValue('sre_portal_response_time', $durationSeconds, 120);
 
                     // Audit log
                     $this->writeSyncLog($event, 'success', null, null);

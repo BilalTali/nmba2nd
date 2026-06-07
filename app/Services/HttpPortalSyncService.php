@@ -149,13 +149,13 @@ class HttpPortalSyncService implements PortalSyncInterface
         // Default 55s — the portal is observed to take 47-50s under load.
         $lastResponseTime = (float) $this->getSharedValue('sre_portal_response_time', 55.0);
 
-        // Floor reduced to 15s to allow fast timeout scaling when the portal is responsive.
-        $effectiveResponseTime = max(15.0, $lastResponseTime);
+        // Floor reduced to 12s to allow fast timeout scaling when the portal is responsive.
+        $effectiveResponseTime = max(12.0, $lastResponseTime);
 
-        // Dynamic timeout: response time × 3, clamped to [45s, 150s].
-        // 45s floor: gives a 30s margin above a 15s baseline response.
-        $calculatedTimeout = (int) ceil($effectiveResponseTime * 3);
-        $timeout = max(45, min(150, $calculatedTimeout));
+        // Dynamic timeout: response time × 1.5, clamped to [12s, 20s].
+        // 12s floor, 20s ceiling. Keeps total execution well below Hostinger 90s timeout.
+        $calculatedTimeout = (int) ceil($effectiveResponseTime * 1.5);
+        $timeout = max(12, min(20, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
@@ -555,14 +555,14 @@ class HttpPortalSyncService implements PortalSyncInterface
                 'event_id' => $event->id,
             ]);
 
-            // Use a SHORT-timeout probe client (30s) rather than the full batch
-            // client (120s). The portal doesn't require CSRF on the event form,
+            // Use a SHORT-timeout probe client (20s) rather than the full batch
+            // client. The portal doesn't require CSRF on the event form,
             // so a timeout here just means we proceed with an empty token — safe.
             $probeClient = new Client([
                 'version'         => 2.0,
                 'cookies'         => $cookieJar,
-                'timeout'         => 30,
-                'connect_timeout' => 15,
+                'timeout'         => 20,
+                'connect_timeout' => 10,
                 'allow_redirects' => ['max' => 5, 'strict' => false],
                 'headers'         => [
                     'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

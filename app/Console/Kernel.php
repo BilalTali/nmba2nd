@@ -72,7 +72,7 @@ class Kernel extends ConsoleKernel
                 Log::channel('sync')->warning('Scheduler halted — portal health probe failed. Circuit breaker tripped (8s cooldown).');
                 
                 // If it wasn't already marked offline, perform a clean sweep of the queue
-                if (!$this->getSharedValue('sre_last_portal_was_offline', false)) {
+                if (!Cache::get('sre_site_was_offline', false)) {
                     Log::channel('sync')->info('Scheduler: Portal transitioned to OFFLINE. Sweeping queue and resetting event statuses.');
                     try {
                         \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'default')->delete();
@@ -97,6 +97,7 @@ class Kernel extends ConsoleKernel
                     }
                 }
 
+                Cache::put('sre_site_was_offline', true, 7200);
                 $this->setSharedValue('sre_last_portal_was_offline', true, 7200);
                 return;
             }
@@ -130,7 +131,8 @@ class Kernel extends ConsoleKernel
             // Portal is alive. If it was previously offline, clear all frozen state:
             //   1. Per-event dispatch locks (set for hours by exponential backoff)
             //   2. Queue jobs with far-future available_at (from release($delaySeconds))
-            if ($this->getSharedValue('sre_last_portal_was_offline', false)) {
+            if (Cache::get('sre_site_was_offline', false)) {
+                Cache::forget('sre_site_was_offline');
                 $this->forgetSharedValue('sre_last_portal_was_offline');
                 Log::channel('sync')->info('Scheduler: portal recovery detected — clearing dispatch locks, slot locks and resetting delayed jobs.');
 
