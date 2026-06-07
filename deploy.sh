@@ -80,10 +80,13 @@ remote_artisan "route:cache  2>&1"
 remote_artisan "view:cache   2>&1"
 ok "Application caches warmed."
 
-# STEP 7 — Clear stale dashboard metrics cache
-log "Step 7/10 — Evicting stale dashboard telemetry cache..."
+# STEP 7 — Clear stale dashboard metrics cache + reset telemetry seed data
+log "Step 7/10 — Evicting stale dashboard cache and resetting telemetry seed data..."
 remote_artisan "cache:clear 2>&1"
-ok "Cache evicted — fresh metrics will appear on next dashboard load."
+# Wipe any stale seed rows that had fake offline periods (fixes incorrect uptime %).
+# Fresh real data will rebuild automatically from live probes within minutes.
+remote_artisan "telemetry:reset --force 2>&1" || warn "telemetry:reset skipped (non-fatal)."
+ok "Cache evicted and stale telemetry seed cleared — uptime % will rebuild from real data."
 
 # STEP 8 — Flush failed jobs and restart queue
 log "Step 8/10 — Flushing failed job table and restarting queue signal..."
