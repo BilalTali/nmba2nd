@@ -135,6 +135,36 @@ if (($_GET['run_worker'] ?? '') === 'true') {
             ->where('available_at', '<=', time())
             ->count();
 
+        // Throughput Optimization: If the queue is empty, but there are still pending events
+        // in the database, run the scheduler sweep to replenish the queue and keep the worker chain alive!
+        if ($remainingJobs === 0) {
+            try {
+                $pendingEventsCount = \App\Models\Event::where('sync_status', 'pending')
+                    ->whereBetween('sync_attempts', [0, 9])
+                    ->where(function ($q) {
+                        $q->whereNull('last_attempt_at')
+                          ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
+                    })
+                    ->count();
+
+                if ($pendingEventsCount > 0) {
+                    $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
+                    $scheduleInput  = new \Symfony\Component\Console\Input\StringInput('schedule:run');
+                    $kernel->handle($scheduleInput, $scheduleOutput);
+
+                    $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
+                        ->where('queue', 'default')
+                        ->whereNull('reserved_at')
+                        ->where('available_at', '<=', time())
+                        ->count();
+
+                    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Loopback scheduler run. Pending events: {$pendingEventsCount}. Dispatched jobs: {$remainingJobs}." . PHP_EOL, FILE_APPEND);
+                }
+            } catch (\Throwable $e) {
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Loopback scheduler failed: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
+            }
+        }
+
         if ($remainingJobs > 0) {
             $liveWindowAge = readPortalLiveWindowAge();
             // CHAIN FIX: threshold raised 15→90s. Previously the check fired AFTER
