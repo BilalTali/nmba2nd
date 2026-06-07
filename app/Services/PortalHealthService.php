@@ -26,10 +26,11 @@ class PortalHealthService
 
     /**
      * How long (seconds) to trust a "portal is alive" result before re-probing.
-     * 90s: short enough to detect outages within 1-2 scheduler ticks (scheduler runs every 60s).
-     * Previously was accidentally set to 360s (6 min) — causing the 5-minute silent window.
+     * 150s = 2.5× the scheduler interval (60s): if cron fires late or misses a run,
+     * the alive state survives without causing false "offline" telemetry.
+     * Previously 90s — too close to the 60s cron interval on shared hosting.
      */
-    protected int $aliveTtl = 90;
+    protected int $aliveTtl = 150;
 
     /**
      * How long (seconds) the circuit breaker stays tripped before we retry.
@@ -40,8 +41,9 @@ class PortalHealthService
     /**
      * How long (seconds) the cross-site portal_live_window signal stays valid.
      * If either site confirmed alive within this window, the other site trusts it.
+     * 30s: slightly longer for Hostinger timing jitter (was 20s).
      */
-    protected int $liveWindowTtl = 20;
+    protected int $liveWindowTtl = 30;
 
     protected float $lastResponseTime = 0.0;
 

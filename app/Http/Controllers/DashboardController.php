@@ -175,9 +175,11 @@ class DashboardController extends Controller
 
         if (!$isOnline && $this->getSharedValue('sre_circuit_breaker_portal_down') !== true) {
             $liveWindow = $this->readPortalLiveWindow();
-            if ($liveWindow !== null && (time() - $liveWindow) < 300) {
-                // Aligned to PortalHealthService::$aliveTtl (90s) — was 360s causing 5-min silent window.
-                $this->setSharedValue('sre_portal_is_alive', true, 90);
+            // 450s = 3× aliveTtl (150s). Covers up to 3 missed cron cycles before showing
+            // as offline. The live_window file is re-written on every successful cron probe.
+            if ($liveWindow !== null && (time() - $liveWindow) < 450) {
+                // Aligned to PortalHealthService::$aliveTtl (150s).
+                $this->setSharedValue('sre_portal_is_alive', true, 150);
                 $this->forgetSharedValue('sre_circuit_breaker_portal_down');
                 $isOnline = true;
                 Log::channel('sync')->info('Dashboard health check: portal_live_window hit — restoring online state.', [
@@ -397,7 +399,11 @@ class DashboardController extends Controller
     public function getTelemetryHistory(): \Illuminate\Support\Collection
     {
         if (SystemTelemetry::count() <= 1) {
+            // Seed placeholder data so the uptime chart is not empty on first load.
+            // ALL seed points are online — no fake outages — so seed data never
+            // artificially lowers the uptime percentage.
             $now = now();
+            Cache::put('system_telemetry_seed_cutoff', $now->timestamp, 48 * 3600);
             for ($i = 288; $i >= 0; $i--) {
                 $time      = (clone $now)->subMinutes($i * 5);
                 $load      = 1.0 + (sin($i / 10) * 0.4) + (rand(0, 100) / 200.0);
@@ -418,6 +424,24 @@ class DashboardController extends Controller
                     'is_online'     => $isOnline,
                 ]);
             }
+        } else {
+            // Auto-purge stale seed records once enough real telemetry has accumulated.
+            // Seed cutoff is stored as a Unix timestamp in cache at seed time.
+            // Once 20+ real records exist after the seed cutoff, the fake seed rows are
+            // deleted — ensuring historical uptime reflects only live probe data.
+            $seedCutoff = Cache::get('system_telemetry_seed_cutoff');
+            if ($seedCutoff) {
+                $cutoffCarbon = \Carbon\Carbon::createFromTimestamp($seedCutoff);
+                $realCount    = SystemTelemetry::where('created_at', '>', $cutoffCarbon)->count();
+                if ($realCount >= 20) {
+                    SystemTelemetry::where('created_at', '<=', $cutoffCarbon)->delete();
+                    Cache::forget('system_telemetry_seed_cutoff');
+                    Log::channel('sync')->info('Telemetry: stale seed data auto-purged.', [
+                        'real_records_present' => $realCount,
+                        'seed_cutoff'          => $cutoffCarbon->toDateTimeString(),
+                    ]);
+                }
+            }
         }
 
         return SystemTelemetry::where('created_at', '>=', now()->subHours(24))
@@ -437,25 +461,13 @@ class DashboardController extends Controller
             ]);
     }
 
-    /** Generate a realistic outage-and-recovery telemetry seed point for slot $i. */
+    /** Generate placeholder telemetry seed data — all online, no fake outages. */
     private function telemetrySeedPoint(int $i): array
     {
-        if ($i >= 220) {
-            return [true, 0, 0.15 + rand(0, 50) / 1000.0];
-        } elseif ($i >= 180) {
-            return [false, (int) round((219 - $i) * (12 / 39)), 5.0 + rand(0, 100) / 100.0];
-        } elseif ($i >= 175) {
-            return [true, (int) round(($i - 175) * (12 / 4)), 0.15 + rand(0, 50) / 1000.0];
-        } elseif ($i >= 120) {
-            return [true, 0, 0.15 + rand(0, 50) / 1000.0];
-        } elseif ($i >= 70) {
-            return [false, (int) round((119 - $i) * (20 / 49)), 5.0 + rand(0, 100) / 100.0];
-        } elseif ($i >= 65) {
-            return [true, (int) round(($i - 65) * (20 / 4)), 0.15 + rand(0, 50) / 1000.0];
-        } elseif ($i >= 20) {
-            return [true, 0, 0.15 + rand(0, 50) / 1000.0];
-        } else {
-            return [false, (int) round((19 - $i) * (7 / 19)), 5.0 + rand(0, 100) / 100.0];
-        }
+        // All seed data is placeholder only — never insert fake offline periods.
+        // Real outage history accumulates from live probes (every 15s from checkPortalHealth).
+        // Keeping seed at 100% online ensures the uptime baseline starts at 100%
+        // and drops only as real offline events occur.
+        return [true, 0, 0.12 + rand(0, 80) / 1000.0];
     }
 }

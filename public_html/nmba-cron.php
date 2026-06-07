@@ -389,9 +389,11 @@ try {
 
     // Check circuit breaker — but since we just probed alive, clear it
     \Illuminate\Support\Facades\Cache::forget('sre_circuit_breaker_portal_down');
-    \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 90);
+    \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 150);
     forgetSharedValue('sre_circuit_breaker_portal_down');
-    setSharedValue('sre_portal_is_alive', true, 90);
+    setSharedValue('sre_portal_is_alive', true, 150);
+    // Re-write portal live window so checkPortalHealth() fallback stays fresh.
+    writePortalLiveWindow();
 
     // Run schedule:run (dispatches SyncBatchJobs for all pending events)
     $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
