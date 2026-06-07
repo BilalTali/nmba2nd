@@ -421,9 +421,9 @@ try {
 
     // Check circuit breaker — but since we just probed alive, clear it
     \Illuminate\Support\Facades\Cache::forget('sre_circuit_breaker_portal_down');
-    \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 360);
+    \Illuminate\Support\Facades\Cache::put('sre_portal_is_alive', true, 90);
     forgetSharedValue('sre_circuit_breaker_portal_down');
-    setSharedValue('sre_portal_is_alive', true, 360);
+    setSharedValue('sre_portal_is_alive', true, 90);
 
     // BUG-1 EXTENSION: Also sweep stale transmission locks on the ONLINE path.
     // Locks from a previous day's outage survive if the portal recovers before

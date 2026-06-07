@@ -35,14 +35,17 @@ trait SharedCacheTrait
     protected function getSharedValue(string $key, $default = null)
     {
         $path = $this->getSharedPath("{$key}.json");
-        if ($path && file_exists($path)) {
-            $data = json_decode(file_get_contents($path), true);
-            if (is_array($data) && isset($data['value'], $data['expires_at'])) {
-                if (time() < $data['expires_at']) {
-                    return $data['value'];
+        if ($path) {
+            if (file_exists($path)) {
+                $data = json_decode(file_get_contents($path), true);
+                if (is_array($data) && isset($data['value'], $data['expires_at'])) {
+                    if (time() < $data['expires_at']) {
+                        return $data['value'];
+                    }
+                    @unlink($path);
                 }
-                @unlink($path);
             }
+            return $default;
         }
         return Cache::get($key, $default);
     }

@@ -250,9 +250,9 @@ class Kernel extends ConsoleKernel
         $slotIndex = 0;
         $dispatched = 0;
 
-        // BN-9 FIX: chunk(20) doubles per-sweep throughput vs old chunk(10).
-        // SyncBatchJob timeout is 600s (10 min) — safely covers 20 × ~30s each.
-        foreach ($dispatchable->chunk(20) as $batch) {
+        // BN-9 FIX: chunk(5) ensures batches complete well within the 90s web timeout window.
+        // SyncBatchJob timeout is 300s (5 min) — safely covers 5 × ~30s each.
+        foreach ($dispatchable->chunk(5) as $batch) {
             if ($slotIndex >= $maxSlots) {
                 break;
             }

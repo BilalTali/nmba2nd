@@ -42,9 +42,9 @@ class SyncBatchJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels, SharedCacheTrait;
 
     /**
-     * 10-minute timeout — covers 20 events × ~30s each with overhead.
+     * 5-minute timeout — covers 10 events × ~30s each with overhead.
      */
-    public int $timeout = 600;
+    public int $timeout = 300;
 
     /**
      * Queue-level retry attempts before Laravel marks the batch job as failed.
@@ -80,7 +80,7 @@ class SyncBatchJob implements ShouldQueue
         return [
             (new WithoutOverlapping("sync_batch_slot_{$this->sessionSlot}"))
                 ->dontRelease()
-                ->expireAfter(600)
+                ->expireAfter(300)
         ];
     }
 
