@@ -1273,9 +1273,12 @@ class EventController extends Controller
 
     protected function recordTelemetry(int $pendingCount, float $responseTime, bool $isOnline): void
     {
+        // 60s lock: one browser-poll telemetry record per minute.
+        // The cron writes its own record via cronWriteTelemetry() using a separate
+        // file-based lock, so browser and cron never block each other.
         $lockKey = 'telemetry_log_lock';
         if (!Cache::has($lockKey)) {
-            Cache::put($lockKey, true, 15);
+            Cache::put($lockKey, true, 60);
 
             $load = function_exists('sys_getloadavg') ? (sys_getloadavg()[0] ?? 0) : 0;
             $mem = memory_get_usage(true) / 1024 / 1024;
@@ -1300,9 +1303,12 @@ class EventController extends Controller
 
     protected function getTelemetryHistory(): \Illuminate\Support\Collection
     {
-        // Seed some realistic data if the table is completely empty (e.g. first load)
+        // EventController: same seed data as DashboardController — all 288 points use
+        // the realistic outage pattern seeded here. Once 20+ real records accumulate
+        // OR 5+ offline records appear (real outage detected), purge seed immediately.
         if (\App\Models\SystemTelemetry::count() <= 1) {
             $now = now();
+            Cache::put('system_telemetry_seed_cutoff', $now->timestamp, 48 * 3600);
             // Seed 288 records (every 5 minutes for the last 24 hours)
             for ($i = 288; $i >= 0; $i--) {
                 $time = (clone $now)->subMinutes($i * 5);
@@ -1311,8 +1317,7 @@ class EventController extends Controller
                 $diskFree = @disk_free_space('/') ?: 0;
                 $diskTotal = @disk_total_space('/') ?: 1;
                 $diskUsage = 100 - (($diskFree / $diskTotal) * 100);
-                $latency = 0.12 + (rand(0, 100) / 800.0);
-                
+
                 // Design a realistic outage-and-recovery queue pattern
                 // We have $i from 288 down to 0, representing 288 5-minute intervals (24 hours ago to now).
                 $isOnline = true;
@@ -1374,6 +1379,27 @@ class EventController extends Controller
                     'is_online'     => $isOnline,
                 ]);
             }
+        } else {
+            // Auto-purge stale seed records once enough real telemetry has accumulated,
+            // OR as soon as any real offline records are detected (prevents seed online data
+            // from diluting offline buckets into 'degraded' orange instead of 'offline' red).
+            $seedCutoff = Cache::get('system_telemetry_seed_cutoff');
+            if ($seedCutoff) {
+                $cutoffCarbon = \Carbon\Carbon::createFromTimestamp($seedCutoff);
+                $realCount    = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)->count();
+                $offlineCount = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)
+                    ->where('is_online', false)
+                    ->count();
+                if ($realCount >= 20 || $offlineCount >= 5) {
+                    \App\Models\SystemTelemetry::where('created_at', '<=', $cutoffCarbon)->delete();
+                    Cache::forget('system_telemetry_seed_cutoff');
+                    Log::channel('sync')->info('Telemetry (EventController): stale seed data auto-purged.', [
+                        'real_records_present'    => $realCount,
+                        'offline_records_present' => $offlineCount,
+                        'seed_cutoff'             => $cutoffCarbon->toDateTimeString(),
+                    ]);
+                }
+            }
         }
 
         return \App\Models\SystemTelemetry::where('created_at', '>=', now()->subHours(24))
@@ -1383,13 +1409,13 @@ class EventController extends Controller
             ->values()
             ->map(function ($t) {
                 return [
-                    'time' => $t->created_at->setTimezone('Asia/Kolkata')->format('H:i'),
+                    'time'      => $t->created_at->setTimezone('Asia/Kolkata')->format('H:i'),
                     'timestamp' => $t->created_at->timestamp,
-                    'cpu' => round($t->cpu_load, 2),
-                    'memory' => round($t->memory_usage, 1),
-                    'disk' => round($t->disk_usage, 1),
-                    'pending' => $t->pending_jobs,
-                    'latency' => round($t->response_time * 1000, 0), // to ms
+                    'cpu'       => round($t->cpu_load, 2),
+                    'memory'    => round($t->memory_usage, 1),
+                    'disk'      => round($t->disk_usage, 1),
+                    'pending'   => $t->pending_jobs,
+                    'latency'   => round($t->response_time * 1000, 0), // to ms
                     'is_online' => (bool) $t->is_online,
                 ];
             });

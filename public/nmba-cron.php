@@ -215,6 +215,61 @@ register_shutdown_function(function () use ($lockFile, &$lockReleased) {
     }
 });
 
+// ── Helper: write a telemetry point from the cron (browser-independent) ────────
+//
+// Uses a 60s file-based lock stored in SHARED_DIR so only one telemetry record
+// is written per cron cycle, independent of the browser's 15s telemetry_log_lock.
+// Called AFTER Laravel has been bootstrapped (vendor/autoload loaded).
+function cronWriteTelemetry(bool $isOnline, int $pendingJobs, float $responseTime): void
+{
+    $lockFile = SHARED_DIR . '/cron_telemetry_write.lock';
+
+    // Honour a 60s lock to prevent duplicate writes when peer-trigger fires within same minute.
+    if (file_exists($lockFile) && (time() - filemtime($lockFile)) < 55) {
+        return;
+    }
+    touch($lockFile);
+
+    try {
+        $load      = function_exists('sys_getloadavg') ? (sys_getloadavg()[0] ?? 0) : 0;
+        $mem       = memory_get_usage(true) / 1024 / 1024;
+        $diskFree  = @disk_free_space('/') ?: 0;
+        $diskTotal = @disk_total_space('/') ?: 1;
+        $diskUsage = 100 - (($diskFree / $diskTotal) * 100);
+
+        \App\Models\SystemTelemetry::create([
+            'cpu_load'      => $load,
+            'memory_usage'  => $mem,
+            'disk_usage'    => $diskUsage,
+            'pending_jobs'  => $pendingJobs,
+            'response_time' => $responseTime,
+            'is_online'     => $isOnline,
+        ]);
+
+        // Prune records older than 24 hours to keep the table lean.
+        \App\Models\SystemTelemetry::where('created_at', '<', now()->subHours(24))->delete();
+
+        // AUTO-PURGE: If real offline records exist, the seed data is polluting the
+        // uptime timeline. Purge all seed rows immediately so red bars can show.
+        $seedCutoff = \Illuminate\Support\Facades\Cache::get('system_telemetry_seed_cutoff');
+        if ($seedCutoff) {
+            $cutoffCarbon   = \Carbon\Carbon::createFromTimestamp($seedCutoff);
+            $offlineCount   = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)
+                ->where('is_online', false)
+                ->count();
+            $realCount      = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)->count();
+            // Purge seed if: 5+ offline real records, OR 20+ real records
+            if ($offlineCount >= 5 || $realCount >= 20) {
+                \App\Models\SystemTelemetry::where('created_at', '<=', $cutoffCarbon)->delete();
+                \Illuminate\Support\Facades\Cache::forget('system_telemetry_seed_cutoff');
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Cron: Stale seed telemetry purged (offline={$offlineCount}, real={$realCount})." . PHP_EOL, FILE_APPEND);
+            }
+        }
+    } catch (\Throwable $e) {
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Failed to write telemetry: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
+    }
+}
+
 // ── Helper: write cross-site portal live window ───────────────────────────────
 function writePortalLiveWindow(): void
 {
@@ -417,6 +472,11 @@ if (!$portalIsAlive) {
 
                 \Illuminate\Support\Facades\Cache::put('sre_site_was_offline', true, 7200);
 
+                // ── TELEMETRY: Record offline point on first offline transition ──
+                // pendingJobs unknown here (pre-sweep), use 0 as placeholder.
+                // Response time 60.0s indicates a portal timeout.
+                cronWriteTelemetry(false, 0, 60.0);
+
                 file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Queue sweep and dispatch locks cleared successfully.' . PHP_EOL, FILE_APPEND);
             }
         } catch (\Throwable $e) {
@@ -424,15 +484,31 @@ if (!$portalIsAlive) {
         }
         setSharedValue('sre_last_portal_was_offline', true, 7200);
     } else {
-        // Portal already known offline — still clear stale lock files on every probe
-        // (without bootstrapping Laravel, as a lightweight file-only sweep).
+        // Portal already known offline — write ongoing offline telemetry every minute.
+        // Bootstrap Laravel so we can write to the DB (only if not already done above).
+        if (!class_exists('App\\Models\\SystemTelemetry')) {
+            try {
+                if (file_exists(APP_ROOT . '/vendor/autoload.php') && file_exists(APP_ROOT . '/bootstrap/app.php')) {
+                    require APP_ROOT . '/vendor/autoload.php';
+                    $offlineApp    = require_once APP_ROOT . '/bootstrap/app.php';
+                    $offlineKernel = $offlineApp->make(Illuminate\Contracts\Console\Kernel::class);
+                    $offlineKernel->bootstrap();
+                    cronWriteTelemetry(false, 0, 60.0);
+                }
+            } catch (\Throwable $telErr) {
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Could not write offline telemetry (already-offline): ' . $telErr->getMessage() . PHP_EOL, FILE_APPEND);
+            }
+        } else {
+            cronWriteTelemetry(false, 0, 60.0);
+        }
+        // Still clear stale transmission lock files (file-only sweep, no Laravel needed).
         $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
         foreach ($lockFiles as $slotLock) {
             if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
                 @unlink($slotLock);
             }
         }
-    }
+    } // end already-offline else
 
     $lockReleased = true;
     @unlink($lockFile);
@@ -512,6 +588,10 @@ try {
     $workersToSpawn = min($maxSlots, $pendingJobs);
 
     file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Scheduler finished. Pending jobs: {$pendingJobs}. Max slots: {$maxSlots}. Spawning {$workersToSpawn} parallel workers." . PHP_EOL, FILE_APPEND);
+
+    // ── TELEMETRY: Record online point every cron minute ─────────────────────
+    // Response time 0.12s indicates a normal fast probe response.
+    cronWriteTelemetry(true, $pendingJobs, 0.12);
 
     if ($workersToSpawn > 0 && !str_contains($_SERVER['HTTP_HOST'] ?? '', 'localhost') && !str_contains($_SERVER['HTTP_HOST'] ?? '', '127.0.0.1')) {
         $host     = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';

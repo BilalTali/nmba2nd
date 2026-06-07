@@ -373,9 +373,12 @@ class DashboardController extends Controller
 
     public function recordTelemetry(int $pendingCount, float $responseTime, bool $isOnline): void
     {
+        // 60s lock: one browser-poll telemetry record per minute.
+        // The cron writes its own record via cronWriteTelemetry() using a separate
+        // file-based lock, so browser and cron never block each other.
         $lockKey = 'telemetry_log_lock';
         if (!Cache::has($lockKey)) {
-            Cache::put($lockKey, true, 15);
+            Cache::put($lockKey, true, 60);
 
             $load       = function_exists('sys_getloadavg') ? (sys_getloadavg()[0] ?? 0) : 0;
             $mem        = memory_get_usage(true) / 1024 / 1024;
@@ -433,12 +436,20 @@ class DashboardController extends Controller
             if ($seedCutoff) {
                 $cutoffCarbon = \Carbon\Carbon::createFromTimestamp($seedCutoff);
                 $realCount    = SystemTelemetry::where('created_at', '>', $cutoffCarbon)->count();
-                if ($realCount >= 20) {
+                // Also purge immediately when any real offline records exist:
+                // seed data (all is_online=true) mixed with offline records causes
+                // every 30-min bucket to appear as 'degraded' (orange) instead of
+                // 'offline' (red) because ratio > 0 even though portal was down.
+                $offlineCount = SystemTelemetry::where('created_at', '>', $cutoffCarbon)
+                    ->where('is_online', false)
+                    ->count();
+                if ($realCount >= 20 || $offlineCount >= 5) {
                     SystemTelemetry::where('created_at', '<=', $cutoffCarbon)->delete();
                     Cache::forget('system_telemetry_seed_cutoff');
                     Log::channel('sync')->info('Telemetry: stale seed data auto-purged.', [
-                        'real_records_present' => $realCount,
-                        'seed_cutoff'          => $cutoffCarbon->toDateTimeString(),
+                        'real_records_present'    => $realCount,
+                        'offline_records_present' => $offlineCount,
+                        'seed_cutoff'             => $cutoffCarbon->toDateTimeString(),
                     ]);
                 }
             }
