@@ -213,26 +213,27 @@ class PortalHealthService
     {
         $maxSlots = (int) config('services.sync.max_slots', 8);
 
-        // 1. If portal is degraded, scale down significantly to allow recovery
+        // CRITICAL THROUGHPUT FIX:
+        // Previous logic capped slots at 2 whenever response_time > 15s.
+        // The portal consistently takes 47-55s under load, so this ALWAYS returned 2
+        // slots instead of 8 — a 4× throughput penalty for normal operating conditions.
+        //
+        // A slow portal needs MORE parallel sessions to compensate, not fewer.
+        // We now only scale down if the portal is ACTIVELY FAILING
+        // (circuit breaker trips / connection errors), not just because it's slow.
+        //
+        // If the portal is degraded (active circuit breaker trips with failures),
+        // use 2 slots to give it breathing room. Otherwise always use max slots.
         if ($this->getSharedValue('sre_portal_is_degraded') === true) {
-            return min(2, $maxSlots);
+            // Count consecutive failures to determine scale-back level
+            $failures = (int) $this->getSharedValue('sre_consecutive_portal_failures', 0);
+            if ($failures >= 3) {
+                return min(2, $maxSlots); // actively failing — back off hard
+            }
+            return min(4, $maxSlots); // early degradation — moderate back-off
         }
 
-        // 2. Read the latest response time, falling back to ping time, then to 3.0s
-        $responseTime = $this->getSharedValue('sre_portal_response_time');
-        if ($responseTime === null) {
-            $responseTime = $this->getSharedValue('sre_portal_ping_time', 3.0);
-        }
-        $responseTime = (float) $responseTime;
-
-        if ($responseTime > 15.0) {
-            return min(2, $maxSlots); // very slow/struggling
-        } elseif ($responseTime > 8.0) {
-            return min(3, $maxSlots); // slow
-        } elseif ($responseTime > 4.0) {
-            return min(5, $maxSlots); // moderate
-        }
-
-        return $maxSlots; // healthy
+        // Portal is healthy or slow-but-alive: use all available slots
+        return $maxSlots;
     }
 }

@@ -209,8 +209,11 @@ class Kernel extends ConsoleKernel
                 $q->where(function ($query) {
                     $query->where('sync_status', 'pending')
                           ->where(function ($inner) {
+                              // THROUGHPUT FIX: reduced 5min → 2min.
+                              // Dispatch lock (6min) + transient lock (90s) already prevent
+                              // double-processing; 5min was unnecessarily starving events.
                               $inner->whereNull('last_attempt_at')
-                                    ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
+                                    ->orWhere('last_attempt_at', '<', now()->subMinutes(2));
                           });
                 })
                 ->orWhere(function ($query) {
@@ -252,9 +255,11 @@ class Kernel extends ConsoleKernel
         $slotIndex = 0;
         $dispatched = 0;
 
-        // BN-9 FIX: chunk(5) ensures batches complete well within the 90s web timeout window.
-        // SyncBatchJob timeout is 300s (5 min) — safely covers 5 × ~30s each.
-        foreach ($dispatchable->chunk(5) as $batch) {
+        // THROUGHPUT FIX: chunk(20) — SyncBatchJob processes up to 20 events per slot.
+        // 8 slots × 20 events = 160 events per scheduler sweep (was 40 with chunk(5)).
+        // SyncBatchJob has a 35s wall-clock guard that stops processing if it runs long;
+        // jitter was also reduced so a 20-event batch completes in ~60-70s comfortably.
+        foreach ($dispatchable->chunk(20) as $batch) {
             if ($slotIndex >= $maxSlots) {
                 break;
             }
@@ -273,9 +278,10 @@ class Kernel extends ConsoleKernel
 
             dispatch(new SyncBatchJob($batchIds, $slotIndex));
 
-            // Dispatch lock: 10 min, prevents duplicate-selection of same events
+            // Dispatch lock: 6 min, prevents duplicate-selection of same events.
+            // Previously 10 min — reduced so events don't stay locked if a worker dies early.
             foreach ($batchIds as $id) {
-                Cache::put("sre_sync_dispatch_lock_{$id}", true, now()->addMinutes(10));
+                Cache::put("sre_sync_dispatch_lock_{$id}", true, now()->addMinutes(6));
             }
 
             Log::channel('sync')->info("Scheduler dispatched SyncBatchJob.", [

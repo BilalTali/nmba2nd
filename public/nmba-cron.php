@@ -109,11 +109,15 @@ if (($_GET['run_worker'] ?? '') === 'true') {
         $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
         $kernel->bootstrap();
 
-        // THROUGHPUT FIX: max-time raised 15→50s so each worker processes a full
-        // 5-event batch (~45s) instead of stopping after 1 event.
-        // timeout raised 30→60s: a 5-event SyncBatchJob runs ~45s; 30s was too tight.
+        // Extend PHP execution time for this worker request.
+        // Hostinger LiteSpeed default is ~90s; set_time_limit overrides it for the current process.
+        @set_time_limit(300);
+
+        // THROUGHPUT FIX: max-time raised 50→80s — portal takes 30-50s per event;
+        // 50s only allowed 1 event per worker. 80s allows 2+ events per worker.
+        // timeout raised 60→85s to cover a full portal response + overhead.
         $output = new \Symfony\Component\Console\Output\BufferedOutput();
-        $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=50 --tries=10 --timeout=60 --stop-when-empty');
+        $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=80 --tries=10 --timeout=85 --stop-when-empty');
         $exitCode   = $kernel->handle($input, $output);
         $outputText = $output->fetch();
 
@@ -143,7 +147,7 @@ if (($_GET['run_worker'] ?? '') === 'true') {
                     ->whereBetween('sync_attempts', [0, 9])
                     ->where(function ($q) {
                         $q->whereNull('last_attempt_at')
-                          ->orWhere('last_attempt_at', '<', now()->subMinutes(5));
+                          ->orWhere('last_attempt_at', '<', now()->subMinutes(2));
                     })
                     ->count();
 

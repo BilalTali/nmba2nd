@@ -133,8 +133,9 @@ class SyncBatchJob implements ShouldQueue
 
         foreach ($this->eventIds as $eventId) {
             // Guard: Stop mid-batch if running too long (prevents LSAPI process kills).
-            // LiteSpeed kills processes at 90s, so we stop at 35s.
-            if (microtime(true) - $batchStartTime > 35.0) {
+            // LiteSpeed kills processes at 90s. With jitter reduced to 200-500ms per event
+            // and ~30s portal response time, stop at 75s to give clean shutdown time.
+            if (microtime(true) - $batchStartTime > 75.0) {
                 $unprocessedIds = array_diff($this->eventIds, $processedIds);
                 foreach ($unprocessedIds as $unprocessedId) {
                     Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");

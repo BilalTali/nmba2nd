@@ -694,9 +694,10 @@ class HttpPortalSyncService implements PortalSyncInterface
                 $event->save();
             }
 
-            // Jitter delay proportional to attempt count to spread out retry storms.
-            $jitterBase = min(5, $event->sync_attempts + 1);
-            usleep(random_int(500_000 * $jitterBase, 1_500_000 * $jitterBase));
+            // THROUGHPUT FIX: Jitter capped at 200-500ms flat (was 0.5-7.5s per event × 20 events = 2.5 min wasted).
+            // A tiny fixed jitter is enough to prevent thundering-herd on the portal;
+            // large proportional delays were killing batch throughput with no benefit.
+            usleep(random_int(200_000, 500_000));
 
             // Per-slot transmission lock — different slots can run simultaneously.
             try {
