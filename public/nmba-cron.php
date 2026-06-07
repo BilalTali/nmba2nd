@@ -287,7 +287,7 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $portalUrl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 35);
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
     curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);

@@ -152,10 +152,10 @@ class HttpPortalSyncService implements PortalSyncInterface
         // Floor reduced to 12s to allow fast timeout scaling when the portal is responsive.
         $effectiveResponseTime = max(12.0, $lastResponseTime);
 
-        // Dynamic timeout: response time × 1.5, clamped to [12s, 20s].
-        // 12s floor, 20s ceiling. Keeps total execution well below Hostinger 90s timeout.
+        // Dynamic timeout: response time × 1.5, clamped to [12s, 35s].
+        // 12s floor, 35s ceiling. Keeps total execution well below Hostinger 90s timeout.
         $calculatedTimeout = (int) ceil($effectiveResponseTime * 1.5);
-        $timeout = max(12, min(20, $calculatedTimeout));
+        $timeout = max(12, min(35, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,
@@ -561,7 +561,7 @@ class HttpPortalSyncService implements PortalSyncInterface
             $probeClient = new Client([
                 'version'         => 2.0,
                 'cookies'         => $cookieJar,
-                'timeout'         => 20,
+                'timeout'         => 35,
                 'connect_timeout' => 10,
                 'allow_redirects' => ['max' => 5, 'strict' => false],
                 'headers'         => [

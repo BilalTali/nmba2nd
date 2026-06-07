@@ -22,7 +22,7 @@ class PortalHealthService
      * 12s: if the portal is alive it responds fast;
      * a 90-second hang just wastes the entire cron window.
      */
-    protected int $timeout = 12;
+    protected int $timeout = 25;
 
     /**
      * How long (seconds) to trust a "portal is alive" result before re-probing.
