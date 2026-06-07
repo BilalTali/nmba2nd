@@ -101,227 +101,233 @@ class SyncBatchJob implements ShouldQueue
             return;
         }
 
-        // ── Step 1: Establish portal session (one login for the whole batch) ──
-        $syncService = new HttpPortalSyncService($this->sessionSlot);
+        $this->writeSlotCrossLock($this->sessionSlot);
 
         try {
-            $syncService->ensureAuthenticated();
-        } catch (AuthenticationSyncException $e) {
-            $this->handleAuthFailureForBatch($e->getMessage());
-            return;
-        } catch (TransientSyncException $e) {
-            Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Login failed (transient). Releasing batch.", [
-                'slot'  => $this->sessionSlot,
-                'error' => $e->getMessage(),
-            ]);
-            $this->release(60);
-            return;
-        } catch (Exception $e) {
-            Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Unexpected error during login. Releasing batch.", [
-                'slot'  => $this->sessionSlot,
-                'error' => $e->getMessage(),
-            ]);
-            $this->release(60);
-            return;
-        }
-
-        // ── Step 2: Process each event in the batch ───────────────────────────
-        $successCount    = 0;
-        $failureCount    = 0;
-        $processedIds    = []; // tracks events we started processing (for lock cleanup)
-        $batchStartTime  = microtime(true);
-
-        foreach ($this->eventIds as $eventId) {
-            // Guard: Stop mid-batch if running too long (prevents LSAPI process kills).
-            // LiteSpeed kills processes at 90s. With jitter reduced to 200-500ms per event
-            // and ~30s portal response time, stop at 75s to give clean shutdown time.
-            if (microtime(true) - $batchStartTime > 75.0) {
-                $unprocessedIds = array_diff($this->eventIds, $processedIds);
-                foreach ($unprocessedIds as $unprocessedId) {
-                    Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
-                }
-                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Approaching LiteSpeed timeout limit. Halting remaining events.");
-                break;
-            }
-
-            // Guard: Stop mid-batch if circuit breaker tripped.
-            // IMPORTANT: clear dispatch locks for all events we haven't touched yet,
-            // so the next scheduler sweep (after the 8s circuit breaker cooldown)
-            // can immediately pick them up instead of waiting 10 minutes.
-            if (Cache::get('sre_circuit_breaker_portal_down') === true) {
-                $unprocessedIds = array_diff($this->eventIds, $processedIds);
-                foreach ($unprocessedIds as $unprocessedId) {
-                    Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
-                }
-                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker tripped mid-batch. Halting remaining events.");
-                break;
-            }
-
-            $processedIds[] = $eventId;
-
-            $event = Event::find($eventId);
-
-            // Skip if event no longer exists or is already synced
-            if (!$event || $event->sync_status === 'synced' || $event->sync_status === 'failed_permanently') {
-                continue;
-            }
-
-            // Skip events that have exceeded their retry budget
-            if ($event->sync_attempts >= 9) {
-                Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Event {$eventId} exceeded attempt budget — resetting.", [
-                    'slot'          => $this->sessionSlot,
-                    'event_id'      => $eventId,
-                    'sync_attempts' => $event->sync_attempts,
-                ]);
-                $event->update([
-                    'sync_attempts'   => 0,
-                    'sync_status'     => 'pending',
-                    'last_attempt_at' => now(),
-                ]);
-                Cache::forget("sre_sync_dispatch_lock_{$eventId}");
-                continue;
-            }
-
-            // Atomic CAS claim: pending or stuck syncing → syncing (prevents double processing)
-            $claimed = Event::where('id', $eventId)
-                ->where(function ($query) {
-                    $query->where('sync_status', 'pending')
-                          ->orWhere(function ($q) {
-                              $q->where('sync_status', 'syncing')
-                                ->where('updated_at', '<', now()->subMinutes(10));
-                          });
-                })
-                ->update([
-                    'sync_status'     => 'syncing',
-                    'sync_attempts'   => DB::raw('sync_attempts + 1'),
-                    'last_attempt_at' => now(),
-                ]);
-
-            if ($claimed === 0) {
-                // Another worker already claimed this event
-                Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: CAS claim rejected for event {$eventId} — already claimed.", [
-                    'slot'     => $this->sessionSlot,
-                    'event_id' => $eventId,
-                ]);
-                continue;
-            }
-
-            $event->refresh();
-            $startTime = microtime(true);
+            // ── Step 1: Establish portal session (one login for the whole batch) ──
+            $syncService = new HttpPortalSyncService($this->sessionSlot);
 
             try {
-                $success    = $syncService->sync($event);
-                $durationMs = (int) round((microtime(true) - $startTime) * 1000);
+                $syncService->ensureAuthenticated();
+            } catch (AuthenticationSyncException $e) {
+                $this->handleAuthFailureForBatch($e->getMessage());
+                return;
+            } catch (TransientSyncException $e) {
+                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Login failed (transient). Releasing batch.", [
+                    'slot'  => $this->sessionSlot,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->release(60);
+                return;
+            } catch (Exception $e) {
+                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Unexpected error during login. Releasing batch.", [
+                    'slot'  => $this->sessionSlot,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->release(60);
+                return;
+            }
 
-                if ($success) {
-                    $storedPaths = $event->photo_paths;
-                    $event->markSynced();
+            // ── Step 2: Process each event in the batch ───────────────────────────
+            $successCount    = 0;
+            $failureCount    = 0;
+            $processedIds    = []; // tracks events we started processing (for lock cleanup)
+            $batchStartTime  = microtime(true);
 
-                    // Clear dispatch lock on success
-                    Cache::forget("sre_sync_dispatch_lock_{$eventId}");
-                    Cache::forget('sre_consecutive_auth_failures');
-                    $this->forgetSharedValue('sre_consecutive_portal_failures');
-
-                    // Update response time in shared cache (2 min TTL to adapt quickly to portal latency changes)
-                    $durationSeconds = $durationMs / 1000.0;
-                    $this->setSharedValue('sre_portal_response_time', $durationSeconds, 120);
-
-                    // Audit log
-                    $this->writeSyncLog($event, 'success', null, null);
-
-                    // Post-sync media management: move files to 'events/synced/'
-                    $newPaths = [];
-                    foreach ($storedPaths as $path) {
-                        if (str_contains($path, 'events/synced/')) {
-                            $newPaths[] = $path;
-                            continue;
-                        }
-                        if (Storage::disk('public')->exists($path)) {
-                            $newPath = str_replace('events/', 'events/synced/', $path);
-                            Storage::disk('public')->move($path, $newPath);
-                            $newPaths[] = $newPath;
-                        }
+            foreach ($this->eventIds as $eventId) {
+                // Guard: Stop mid-batch if running too long (prevents LSAPI process kills).
+                // LiteSpeed kills processes at 90s. With jitter reduced to 200-500ms per event
+                // and ~30s portal response time, stop at 75s to give clean shutdown time.
+                if (microtime(true) - $batchStartTime > 75.0) {
+                    $unprocessedIds = array_diff($this->eventIds, $processedIds);
+                    foreach ($unprocessedIds as $unprocessedId) {
+                        Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
                     }
-                    if (!empty($newPaths)) {
-                        $event->photo_paths = $newPaths;
-                        $event->save();
-                    }
-
-                    Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Event synced successfully.", [
-                        'slot'          => $this->sessionSlot,
-                        'event_id'      => $eventId,
-                        'duration_ms'   => $durationMs,
-                        'sync_attempts' => $event->sync_attempts,
-                    ]);
-
-                    $successCount++;
-
-                    // Clear degraded signal on first success — portal is actually
-                    // submitting events, so Degraded badge should return to Online.
-                    if ($successCount === 1) {
-                        $this->forgetSharedValue('sre_portal_is_degraded');
-                    }
-
-                } else {
-                    $this->writeSyncLog($event, 'failure', null, 'Sync service returned false — portal did not confirm submission.');
-                    $event->markFailed('Sync service returned false — portal did not confirm submission.');
-                    $failureCount++;
+                    Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Approaching LiteSpeed timeout limit. Halting remaining events.");
+                    break;
                 }
 
-            } catch (AuthenticationSyncException $e) {
-                // Mid-batch auth failure — pause the whole batch
-                $this->writeSyncLog($event, 'failure', null, $e->getMessage());
-                $event->markFailed($e->getMessage());
-                $this->handleAuthFailureForBatch($e->getMessage());
-                return; // Stop processing the rest of the batch
-            } catch (PermanentSyncException $e) {
-                $this->writeSyncLog($event, 'permanent_failure', null, $e->getMessage());
-                $event->markFailedPermanently($e->getMessage());
-                Cache::forget("sre_sync_dispatch_lock_{$eventId}");
+                // Guard: Stop mid-batch if circuit breaker tripped.
+                // IMPORTANT: clear dispatch locks for all events we haven't touched yet,
+                // so the next scheduler sweep (after the 8s circuit breaker cooldown)
+                // can immediately pick them up instead of waiting 10 minutes.
+                if (Cache::get('sre_circuit_breaker_portal_down') === true) {
+                    $unprocessedIds = array_diff($this->eventIds, $processedIds);
+                    foreach ($unprocessedIds as $unprocessedId) {
+                        Cache::forget("sre_sync_dispatch_lock_{$unprocessedId}");
+                    }
+                    Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Circuit breaker tripped mid-batch. Halting remaining events.");
+                    break;
+                }
 
-                Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: Permanent failure for event {$eventId}.", [
-                    'slot'     => $this->sessionSlot,
-                    'event_id' => $eventId,
-                    'reason'   => mb_substr($e->getMessage(), 0, 500),
-                ]);
-                $failureCount++;
+                $processedIds[] = $eventId;
 
-            } catch (TransientSyncException $e) {
-                $this->writeSyncLog($event, 'failure', null, $e->getMessage());
+                $event = Event::find($eventId);
 
-                // Set rest time to exactly 1 minute (60 seconds)
-                $delaySeconds = 60;
+                // Skip if event no longer exists or is already synced
+                if (!$event || $event->sync_status === 'synced' || $event->sync_status === 'failed_permanently') {
+                    continue;
+                }
 
-                $event->markFailed($e->getMessage());
-                Cache::put("sre_sync_dispatch_lock_{$eventId}", true, $delaySeconds + 30);
+                // Skip events that have exceeded their retry budget
+                if ($event->sync_attempts >= 9) {
+                    Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Event {$eventId} exceeded attempt budget — resetting.", [
+                        'slot'          => $this->sessionSlot,
+                        'event_id'      => $eventId,
+                        'sync_attempts' => $event->sync_attempts,
+                    ]);
+                    $event->update([
+                        'sync_attempts'   => 0,
+                        'sync_status'     => 'pending',
+                        'last_attempt_at' => now(),
+                    ]);
+                    Cache::forget("sre_sync_dispatch_lock_{$eventId}");
+                    continue;
+                }
 
-                Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Transient failure for event {$eventId}. Backoff set.", [
-                    'slot'         => $this->sessionSlot,
-                    'event_id'     => $eventId,
-                    'backoff_secs' => $delaySeconds,
-                    'reason'       => mb_substr($e->getMessage(), 0, 300),
-                ]);
-                $failureCount++;
+                // Atomic CAS claim: pending or stuck syncing → syncing (prevents double processing)
+                $claimed = Event::where('id', $eventId)
+                    ->where(function ($query) {
+                        $query->where('sync_status', 'pending')
+                              ->orWhere(function ($q) {
+                                  $q->where('sync_status', 'syncing')
+                                    ->where('updated_at', '<', now()->subMinutes(10));
+                              });
+                    })
+                    ->update([
+                        'sync_status'     => 'syncing',
+                        'sync_attempts'   => DB::raw('sync_attempts + 1'),
+                        'last_attempt_at' => now(),
+                    ]);
 
-            } catch (Exception $e) {
-                $this->writeSyncLog($event, 'failure', null, 'Unexpected: ' . $e->getMessage());
-                $event->markFailed('Unexpected exception: ' . $e->getMessage());
+                if ($claimed === 0) {
+                    // Another worker already claimed this event
+                    Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: CAS claim rejected for event {$eventId} — already claimed.", [
+                        'slot'     => $this->sessionSlot,
+                        'event_id' => $eventId,
+                    ]);
+                    continue;
+                }
 
-                Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: Unexpected exception for event {$eventId}.", [
-                    'slot'     => $this->sessionSlot,
-                    'event_id' => $eventId,
-                    'error'    => $e->getMessage(),
-                ]);
-                $failureCount++;
+                $event->refresh();
+                $startTime = microtime(true);
+
+                try {
+                    $success    = $syncService->sync($event);
+                    $durationMs = (int) round((microtime(true) - $startTime) * 1000);
+
+                    if ($success) {
+                        $storedPaths = $event->photo_paths;
+                        $event->markSynced();
+
+                        // Clear dispatch lock on success
+                        Cache::forget("sre_sync_dispatch_lock_{$eventId}");
+                        Cache::forget('sre_consecutive_auth_failures');
+                        $this->forgetSharedValue('sre_consecutive_portal_failures');
+
+                        // Update response time in shared cache (2 min TTL to adapt quickly to portal latency changes)
+                        $durationSeconds = $durationMs / 1000.0;
+                        $this->setSharedValue('sre_portal_response_time', $durationSeconds, 120);
+
+                        // Audit log
+                        $this->writeSyncLog($event, 'success', null, null);
+
+                        // Post-sync media management: move files to 'events/synced/'
+                        $newPaths = [];
+                        foreach ($storedPaths as $path) {
+                            if (str_contains($path, 'events/synced/')) {
+                                $newPaths[] = $path;
+                                continue;
+                            }
+                            if (Storage::disk('public')->exists($path)) {
+                                $newPath = str_replace('events/', 'events/synced/', $path);
+                                Storage::disk('public')->move($path, $newPath);
+                                $newPaths[] = $newPath;
+                            }
+                        }
+                        if (!empty($newPaths)) {
+                            $event->photo_paths = $newPaths;
+                            $event->save();
+                        }
+
+                        Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Event synced successfully.", [
+                            'slot'          => $this->sessionSlot,
+                            'event_id'      => $eventId,
+                            'duration_ms'   => $durationMs,
+                            'sync_attempts' => $event->sync_attempts,
+                    ]);
+
+                        $successCount++;
+
+                        // Clear degraded signal on first success — portal is actually
+                        // submitting events, so Degraded badge should return to Online.
+                        if ($successCount === 1) {
+                            $this->forgetSharedValue('sre_portal_is_degraded');
+                        }
+
+                    } else {
+                        $this->writeSyncLog($event, 'failure', null, 'Sync service returned false — portal did not confirm submission.');
+                        $event->markFailed('Sync service returned false — portal did not confirm submission.');
+                        $failureCount++;
+                    }
+
+                } catch (AuthenticationSyncException $e) {
+                    // Mid-batch auth failure — pause the whole batch
+                    $this->writeSyncLog($event, 'failure', null, $e->getMessage());
+                    $event->markFailed($e->getMessage());
+                    $this->handleAuthFailureForBatch($e->getMessage());
+                    return; // Stop processing the rest of the batch
+                } catch (PermanentSyncException $e) {
+                    $this->writeSyncLog($event, 'permanent_failure', null, $e->getMessage());
+                    $event->markFailedPermanently($e->getMessage());
+                    Cache::forget("sre_sync_dispatch_lock_{$eventId}");
+
+                    Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: Permanent failure for event {$eventId}.", [
+                        'slot'     => $this->sessionSlot,
+                        'event_id' => $eventId,
+                        'reason'   => mb_substr($e->getMessage(), 0, 500),
+                    ]);
+                    $failureCount++;
+
+                } catch (TransientSyncException $e) {
+                    $this->writeSyncLog($event, 'failure', null, $e->getMessage());
+
+                    // Set rest time to exactly 1 minute (60 seconds)
+                    $delaySeconds = 60;
+
+                    $event->markFailed($e->getMessage());
+                    Cache::put("sre_sync_dispatch_lock_{$eventId}", true, $delaySeconds + 30);
+
+                    Log::channel('sync')->warning("SyncBatchJob slot {$this->sessionSlot}: Transient failure for event {$eventId}. Backoff set.", [
+                        'slot'         => $this->sessionSlot,
+                        'event_id'     => $eventId,
+                        'backoff_secs' => $delaySeconds,
+                        'reason'       => mb_substr($e->getMessage(), 0, 300),
+                    ]);
+                    $failureCount++;
+
+                } catch (Exception $e) {
+                    $this->writeSyncLog($event, 'failure', null, 'Unexpected: ' . $e->getMessage());
+                    $event->markFailed('Unexpected exception: ' . $e->getMessage());
+
+                    Log::channel('sync')->error("SyncBatchJob slot {$this->sessionSlot}: Unexpected exception for event {$eventId}.", [
+                        'slot'     => $this->sessionSlot,
+                        'event_id' => $eventId,
+                        'error'    => $e->getMessage(),
+                    ]);
+                    $failureCount++;
+                }
             }
-        }
 
-        Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Batch complete.", [
-            'slot'         => $this->sessionSlot,
-            'total_events' => count($this->eventIds),
-            'succeeded'    => $successCount,
-            'failed'       => $failureCount,
-        ]);
+            Log::channel('sync')->info("SyncBatchJob slot {$this->sessionSlot}: Batch complete.", [
+                'slot'         => $this->sessionSlot,
+                'total_events' => count($this->eventIds),
+                'succeeded'    => $successCount,
+                'failed'       => $failureCount,
+            ]);
+        } finally {
+            $this->forgetSlotCrossLock($this->sessionSlot);
+        }
     }
 
     /**

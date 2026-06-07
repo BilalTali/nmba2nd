@@ -266,10 +266,14 @@ class Kernel extends ConsoleKernel
 
             $batchIds = $batch->pluck('id')->toArray();
 
-            // Skip if this slot already has a live batch (WithoutOverlapping lock)
+            // Skip if this slot already has a live batch (WithoutOverlapping lock or cross-site slot lock)
             $slotLockKey = "laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$slotIndex}";
-            if (Cache::has($slotLockKey)) {
-                Log::channel('sync')->info("Scheduler: slot {$slotIndex} is busy — skipping.", [
+            $isLocalLocked = Cache::has($slotLockKey);
+            $isCrossLocked = $this->isSlotCrossLocked($slotIndex);
+
+            if ($isLocalLocked || $isCrossLocked) {
+                $reason = $isLocalLocked ? 'busy locally' : 'busy cross-site';
+                Log::channel('sync')->info("Scheduler: slot {$slotIndex} is {$reason} — skipping.", [
                     'slot' => $slotIndex,
                 ]);
                 $slotIndex++;

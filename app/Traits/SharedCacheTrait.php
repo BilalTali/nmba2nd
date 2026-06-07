@@ -137,4 +137,45 @@ trait SharedCacheTrait
             @unlink($path);
         }
     }
+
+    /**
+     * Check if a slot is currently cross-locked by either site on this server.
+     * Locks expire after 300s (5 minutes) to match the SyncBatchJob timeout,
+     * preventing permanent slot lockouts if a process is forcefully killed.
+     */
+    protected function isSlotCrossLocked(int $slotIndex): bool
+    {
+        $path = $this->getSharedPath("transmission_lock_slot_{$slotIndex}.lock");
+        if ($path && file_exists($path)) {
+            $age = time() - filemtime($path);
+            if ($age < 300) {
+                return true;
+            }
+            // Clear stale lock file
+            @unlink($path);
+        }
+        return false;
+    }
+
+    /**
+     * Write a 0-byte lock file in the shared directory to lock a slot.
+     */
+    protected function writeSlotCrossLock(int $slotIndex): void
+    {
+        $path = $this->getSharedPath("transmission_lock_slot_{$slotIndex}.lock");
+        if ($path) {
+            @file_put_contents($path, '');
+        }
+    }
+
+    /**
+     * Remove the slot lock file from the shared directory.
+     */
+    protected function forgetSlotCrossLock(int $slotIndex): void
+    {
+        $path = $this->getSharedPath("transmission_lock_slot_{$slotIndex}.lock");
+        if ($path && file_exists($path)) {
+            @unlink($path);
+        }
+    }
 }
