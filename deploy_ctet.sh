@@ -16,7 +16,7 @@ SSH_HOST="92.249.46.36"
 SSH_PORT="65002"
 SSH_USER="u335000182"
 SSH_PASS="${SSH_PASS:-Sugen@9313}"
-APP_DIR="/home/u335000182/domains/ctetmonktest.fun/nmbaagent"
+APP_DIR="/home/u335000182/domains/ctetmonktest.fun/public_html"
 PHP="/usr/bin/php"
 
 # ── HELPERS ─────────────────────────────────────────────────────
@@ -52,7 +52,6 @@ remote "echo 'SSH OK'" >/dev/null && ok "SSH connection established." || fail "C
 # STEP 2 — Pull latest code from GitHub
 log "Step 2/10 — Pulling latest code from GitHub..."
 remote "cd $APP_DIR && git stash && git clean -fd && git pull origin main 2>&1"
-remote "mkdir -p $APP_DIR/../public_html && cp $APP_DIR/public_html/nmba-cron.php $APP_DIR/../public_html/nmba-cron.php"
 ok "Code updated."
 
 # STEP 3 — Install Composer production dependencies
