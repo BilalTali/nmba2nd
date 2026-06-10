@@ -31,15 +31,16 @@ class SyncReportCommand extends Command
         $localDb = config('database.connections.mysql.database');
         $localName = ($localDb === 'u335000182_nmbabudgam') ? 'nmbabudgam.in' : 'ctetmonktest.fun';
 
+        $cutoff = now()->subHours($hours)->toDateTimeString();
         $this->info("Fetching performance metrics for local portal ($localName)...");
         try {
             $results = DB::select("
                 SELECT event_date, COUNT(*) AS total
                 FROM events
-                WHERE sync_status = 'synced' AND synced_at >= NOW() - INTERVAL :hours HOUR
+                WHERE sync_status = 'synced' AND synced_at >= :cutoff
                 GROUP BY event_date
                 ORDER BY event_date
-            ", ['hours' => $hours]);
+            ", ['cutoff' => $cutoff]);
         } catch (\Exception $e) {
             $this->error("Failed to query database: " . $e->getMessage());
             return self::FAILURE;
