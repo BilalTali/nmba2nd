@@ -1377,26 +1377,15 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                             {reportData && reportData.report && reportData.report.length > 0 && (
                                 <div className="flex-1 space-y-6">
                                     {/* Summary Cards */}
-                                    <div className="grid grid-cols-3 gap-4">
+                                    <div className="grid grid-cols-2 gap-4">
                                         <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200">
-                                            <p className="text-[10px] font-bold text-slate-505 uppercase tracking-wider mb-1">Timeframe</p>
+                                            <p className="text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1">Timeframe</p>
                                             <p className="text-lg font-black text-slate-800" style={{ fontFamily: "'Outfit', sans-serif" }}>Last {reportData.hours} Hrs</p>
                                         </div>
                                         <div className="p-4 rounded-2xl bg-emerald-50/30 border border-emerald-100">
-                                            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Local ({reportData.local_name})</p>
+                                            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Portal ({reportData.portal_name})</p>
                                             <p className="text-lg font-black text-emerald-700" style={{ fontFamily: "'Outfit', sans-serif" }}>
-                                                {reportData.report.reduce((sum, r) => sum + r.local, 0).toLocaleString()} <span className="text-xs text-slate-400 font-normal">events</span>
-                                            </p>
-                                        </div>
-                                        <div className="p-4 rounded-2xl bg-teal-50/30 border border-teal-100">
-                                            <p className="text-[10px] font-bold text-teal-600 uppercase tracking-wider mb-1">
-                                                Peer {reportData.peer_name ? `(${reportData.peer_name})` : '(Disconnected)'}
-                                            </p>
-                                            <p className="text-lg font-black text-teal-700" style={{ fontFamily: "'Outfit', sans-serif" }}>
-                                                {reportData.peer_name 
-                                                    ? `${reportData.report.reduce((sum, r) => sum + r.peer, 0).toLocaleString()} events` 
-                                                    : 'N/A'
-                                                }
+                                                {reportData.report.reduce((sum, r) => sum + r.total, 0).toLocaleString()} <span className="text-xs text-slate-400 font-normal">events</span>
                                             </p>
                                         </div>
                                     </div>
@@ -1405,23 +1394,15 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                     <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm max-h-[300px] overflow-y-auto">
                                         <table className="w-full text-left border-collapse">
                                             <thead>
-                                                <tr className="bg-slate-55 border-b border-slate-200 text-[10px] font-bold text-slate-505 uppercase tracking-wider sticky top-0">
+                                                <tr className="bg-slate-55 border-b border-slate-200 text-[10px] font-bold text-slate-550 uppercase tracking-wider sticky top-0">
                                                     <th className="py-3.5 px-4 bg-slate-50">Event Date</th>
-                                                    <th className="py-3.5 px-4 text-right bg-slate-50">{reportData.local_name} (Local)</th>
-                                                    <th className="py-3.5 px-4 text-right bg-slate-50">
-                                                        {reportData.peer_name ? reportData.peer_name : 'Peer DB'}
-                                                    </th>
-                                                    <th className="py-3.5 px-4 text-right bg-slate-100">Total Synced</th>
+                                                    <th className="py-3.5 px-4 text-right bg-slate-100">Synced Events</th>
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-100 text-xs">
                                                 {reportData.report.map((row) => (
                                                     <tr key={row.date} className="hover:bg-slate-50/50 transition-colors">
                                                         <td className="py-3 px-4 font-semibold text-slate-700">{row.date}</td>
-                                                        <td className="py-3 px-4 text-right font-mono text-emerald-600 font-bold">{row.local.toLocaleString()}</td>
-                                                        <td className="py-3 px-4 text-right font-mono text-teal-600 font-bold">
-                                                            {reportData.peer_name ? row.peer.toLocaleString() : '-'}
-                                                        </td>
                                                         <td className="py-3 px-4 text-right font-mono text-slate-800 font-black bg-slate-50/20">{row.total.toLocaleString()}</td>
                                                     </tr>
                                                 ))}
@@ -1429,15 +1410,6 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                             <tfoot>
                                                 <tr className="bg-slate-100/50 border-t border-slate-200 text-xs font-bold text-slate-800">
                                                     <td className="py-3 px-4 font-black">Total</td>
-                                                    <td className="py-3 px-4 text-right font-mono text-emerald-700 font-black">
-                                                        {reportData.report.reduce((sum, r) => sum + r.local, 0).toLocaleString()}
-                                                    </td>
-                                                    <td className="py-3 px-4 text-right font-mono text-teal-700 font-black">
-                                                        {reportData.peer_name 
-                                                            ? reportData.report.reduce((sum, r) => sum + r.peer, 0).toLocaleString() 
-                                                            : '-'
-                                                        }
-                                                    </td>
                                                     <td className="py-3 px-4 text-right font-mono text-slate-900 font-black bg-slate-100/80">
                                                         {reportData.report.reduce((sum, r) => sum + r.total, 0).toLocaleString()}
                                                     </td>
