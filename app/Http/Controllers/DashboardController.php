@@ -43,30 +43,22 @@ class DashboardController extends Controller
         $autoSyncPaused           = $this->getSharedValue('auto_sync_paused', false);
         $portalCredentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
-        // Cache dashboard counts for 30 seconds to completely eliminate DB pressure under heavy polling.
-        $cachedMetrics = Cache::remember('dashboard_metrics_counts', 30, function () {
-            $counts = Event::selectRaw('sync_status, COUNT(*) as total')
-                ->groupBy('sync_status')
-                ->pluck('total', 'sync_status');
+        // Fetch dashboard counts in real-time.
+        $counts = Event::selectRaw('sync_status, COUNT(*) as total')
+            ->groupBy('sync_status')
+            ->pluck('total', 'sync_status');
 
-            $transient = Event::where('sync_attempts', '>', 0)
-                ->where('sync_status', 'pending')
-                ->count();
+        $transient = Event::where('sync_attempts', '>', 0)
+            ->where('sync_status', 'pending')
+            ->count();
 
-            return [
-                'counts'    => $counts->toArray(),
-                'transient' => $transient,
-            ];
-        });
-
-        $counts  = collect($cachedMetrics['counts']);
         $metrics = [
             'total'       => $counts->sum(),
             'pending'     => (int) ($counts->get('pending', 0)),
             'syncing'     => (int) ($counts->get('syncing', 0)),
             'synced'      => (int) ($counts->get('synced', 0)),
             'failed_perm' => (int) ($counts->get('failed_permanently', 0)),
-            'transient'   => (int) $cachedMetrics['transient'],
+            'transient'   => (int) $transient,
         ];
 
         // Self-healing Watchdog: if Hostinger cron fails, visiting the dashboard silently wakes up the worker.
@@ -95,50 +87,49 @@ class DashboardController extends Controller
             }
         }
 
-        $cachedHeavyQueries = Cache::remember('dashboard_heavy_queries', 30, function () use ($counts) {
-            $recentEvents   = Event::orderBy('created_at', 'desc')->limit(20)->get();
-            $recentFailures = Event::whereNotNull('last_error_log')->orderBy('last_attempt_at', 'desc')->limit(10)->get();
+        // Fetch remaining metrics in real-time.
+        $recentEvents   = Event::orderBy('created_at', 'desc')->limit(20)->get();
+        $recentFailures = Event::whereNotNull('last_error_log')->orderBy('last_attempt_at', 'desc')->limit(10)->get();
 
-            $statusData = array_values(array_filter([
-                ['name' => 'Synced',  'value' => (int) $counts->get('synced', 0),             'fill' => '#10b981'],
-                ['name' => 'Pending', 'value' => (int) $counts->get('pending', 0),            'fill' => '#f59e0b'],
-                ['name' => 'Failed',  'value' => (int) $counts->get('failed_permanently', 0), 'fill' => '#f43f5e'],
-                ['name' => 'Syncing', 'value' => (int) $counts->get('syncing', 0),            'fill' => '#3b82f6'],
-            ], fn($item) => $item['value'] > 0));
+        $statusData = array_values(array_filter([
+            ['name' => 'Synced',  'value' => (int) $counts->get('synced', 0),             'fill' => '#10b981'],
+            ['name' => 'Pending', 'value' => (int) $counts->get('pending', 0),            'fill' => '#f59e0b'],
+            ['name' => 'Failed',  'value' => (int) $counts->get('failed_permanently', 0), 'fill' => '#f43f5e'],
+            ['name' => 'Syncing', 'value' => (int) $counts->get('syncing', 0),            'fill' => '#3b82f6'],
+        ], fn($item) => $item['value'] > 0));
 
-            $blocks        = $this->getBlocks();
-            $eventsByBlock = Event::selectRaw('block_id, COUNT(*) as count')
-                ->groupBy('block_id')
-                ->get()
-                ->map(fn($item) => [
-                    'name'  => $blocks[$item->block_id] ?? 'Unknown',
-                    'count' => $item->count,
-                ])
-                ->sortByDesc('count')
-                ->values();
+        $blocks        = $this->getBlocks();
+        $eventsByBlock = Event::selectRaw('block_id, COUNT(*) as count')
+            ->groupBy('block_id')
+            ->get()
+            ->map(fn($item) => [
+                'name'  => $blocks[$item->block_id] ?? 'Unknown',
+                'count' => $item->count,
+            ])
+            ->sortByDesc('count')
+            ->values();
 
-            $eventsOverTimeRaw = Event::where('created_at', '>=', now()->subDays(30)->startOfDay())
-                ->selectRaw('DATE(created_at) as date, COUNT(*) as count')
-                ->groupBy('date')
-                ->pluck('count', 'date');
+        $eventsOverTimeRaw = Event::where('created_at', '>=', now()->subDays(30)->startOfDay())
+            ->selectRaw('DATE(created_at) as date, COUNT(*) as count')
+            ->groupBy('date')
+            ->pluck('count', 'date');
 
-            $eventsOverTime = collect();
-            for ($i = 30; $i >= 0; $i--) {
-                $carbonDate = now()->subDays($i);
-                $eventsOverTime->push([
-                    'date'  => $carbonDate->format('M d'),
-                    'count' => $eventsOverTimeRaw->get($carbonDate->format('Y-m-d'), 0),
-                ]);
-            }
+        $eventsOverTime = collect();
+        for ($i = 30; $i >= 0; $i--) {
+            $carbonDate = now()->subDays($i);
+            $eventsOverTime->push([
+                'date'  => $carbonDate->format('M d'),
+                'count' => $eventsOverTimeRaw->get($carbonDate->format('Y-m-d'), 0),
+            ]);
+        }
 
-            return [
-                'recentEvents'   => $recentEvents,
-                'recentFailures' => $recentFailures,
-                'statusData'     => $statusData,
-                'eventsByBlock'  => $eventsByBlock,
-                'eventsOverTime' => $eventsOverTime,
-            ];
-        });
+        $heavyQueries = [
+            'recentEvents'   => $recentEvents,
+            'recentFailures' => $recentFailures,
+            'statusData'     => $statusData,
+            'eventsByBlock'  => $eventsByBlock,
+            'eventsOverTime' => $eventsOverTime,
+        ];
 
         $envFile     = base_path('.env');
         $envContent  = file_exists($envFile) ? file_get_contents($envFile) : '';
@@ -148,13 +139,13 @@ class DashboardController extends Controller
 
         return Inertia::render('Events/Dashboard', [
             'metrics'                 => $metrics,
-            'recentEvents'            => $cachedHeavyQueries['recentEvents'],
-            'recentFailures'          => $cachedHeavyQueries['recentFailures'],
+            'recentEvents'            => $heavyQueries['recentEvents'],
+            'recentFailures'          => $heavyQueries['recentFailures'],
             'autoSyncPaused'          => $autoSyncPaused,
             'portalCredentialsInvalid' => $portalCredentialsInvalid,
-            'statusData'              => $cachedHeavyQueries['statusData'],
-            'eventsByBlock'           => $cachedHeavyQueries['eventsByBlock'],
-            'eventsOverTime'          => $cachedHeavyQueries['eventsOverTime'],
+            'statusData'              => $heavyQueries['statusData'],
+            'eventsByBlock'           => $heavyQueries['eventsByBlock'],
+            'eventsOverTime'          => $heavyQueries['eventsOverTime'],
             'telemetryData'           => $this->getTelemetryHistory(),
             'portalConfig'            => [
                 'portal_url'     => trim($urlMatch[1]    ?? config('services.portal.url', '')),
@@ -198,10 +189,7 @@ class DashboardController extends Controller
         $isPaused           = $this->getSharedValue('auto_sync_paused', false);
         $credentialsInvalid = $this->getSharedValue('portal_credentials_invalid', false);
 
-        $cachedHealth = Cache::get('dashboard_metrics_counts');
-        $pendingCount = $cachedHealth
-            ? (int) ($cachedHealth['counts']['pending'] ?? 0)
-            : Event::where('sync_status', 'pending')->count();
+        $pendingCount = Event::where('sync_status', 'pending')->count();
 
         // Telemetry: reflect true state — healthy=0.1s, degraded=2.0s, offline=60s
         $responseTime = $isOnline ? ($isDegraded ? 2.0 : 0.1) : 60.0;
