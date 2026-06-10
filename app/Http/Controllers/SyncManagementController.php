@@ -192,6 +192,7 @@ class SyncManagementController extends Controller
 
             for ($i = 0; $i < 8; $i++) {
                 Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                $this->forgetSlotCrossLock($i);
             }
 
             Cache::forget('dashboard_metrics_counts');

@@ -135,7 +135,10 @@ if (($_GET['run_worker'] ?? '') === 'true') {
         // If so, spawn another async worker loopback!
         $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
             ->where('queue', 'default')
-            ->whereNull('reserved_at')
+            ->where(function ($query) {
+                $query->whereNull('reserved_at')
+                      ->orWhere('reserved_at', '<=', time() - 900);
+            })
             ->where('available_at', '<=', time())
             ->count();
 
@@ -158,7 +161,10 @@ if (($_GET['run_worker'] ?? '') === 'true') {
 
                     $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
                         ->where('queue', 'default')
-                        ->whereNull('reserved_at')
+                        ->where(function ($query) {
+                            $query->whereNull('reserved_at')
+                                  ->orWhere('reserved_at', '<=', time() - 900);
+                        })
                         ->where('available_at', '<=', time())
                         ->count();
 
@@ -461,7 +467,7 @@ if (!$portalIsAlive) {
                 $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
                 $staleCount = 0;
                 foreach ($lockFiles as $slotLock) {
-                    if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+                    if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
                         @unlink($slotLock);
                         $staleCount++;
                     }
@@ -504,7 +510,7 @@ if (!$portalIsAlive) {
         // Still clear stale transmission lock files (file-only sweep, no Laravel needed).
         $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
         foreach ($lockFiles as $slotLock) {
-            if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+            if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
                 @unlink($slotLock);
             }
         }
@@ -560,7 +566,7 @@ try {
     // and ensures slots are never permanently blocked by orphaned lock files.
     $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
     foreach ($lockFiles as $slotLock) {
-        if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 900) {
+        if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
             @unlink($slotLock);
             file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Cleared stale transmission lock (online sweep): ' . basename($slotLock) . PHP_EOL, FILE_APPEND);
         }
@@ -580,7 +586,10 @@ try {
     // Now, instead of running a worker synchronously, spawn parallel async workers!
     $pendingJobs = \Illuminate\Support\Facades\DB::table('jobs')
         ->where('queue', 'default')
-        ->whereNull('reserved_at')
+        ->where(function ($query) {
+            $query->whereNull('reserved_at')
+                  ->orWhere('reserved_at', '<=', time() - 900);
+        })
         ->where('available_at', '<=', time())
         ->count();
 

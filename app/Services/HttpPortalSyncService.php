@@ -149,13 +149,13 @@ class HttpPortalSyncService implements PortalSyncInterface
         // Default 55s — the portal is observed to take 47-50s under load.
         $lastResponseTime = (float) $this->getSharedValue('sre_portal_response_time', 55.0);
 
-        // Floor reduced to 12s to allow fast timeout scaling when the portal is responsive.
-        $effectiveResponseTime = max(12.0, $lastResponseTime);
+        // Floor raised to 25s to allow reliable event uploads with images.
+        $effectiveResponseTime = max(25.0, $lastResponseTime);
 
-        // Dynamic timeout: response time × 1.5, clamped to [12s, 35s].
-        // 12s floor, 35s ceiling. Keeps total execution well below Hostinger 90s timeout.
+        // Dynamic timeout: response time × 1.5, clamped to [25s, 45s].
+        // 25s floor, 45s ceiling. Keeps total execution well below Hostinger 90s timeout.
         $calculatedTimeout = (int) ceil($effectiveResponseTime * 1.5);
-        $timeout = max(12, min(35, $calculatedTimeout));
+        $timeout = max(25, min(45, $calculatedTimeout));
 
         return new Client([
             'version'         => 2.0,

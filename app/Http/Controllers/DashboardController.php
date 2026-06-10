@@ -243,6 +243,7 @@ class DashboardController extends Controller
             try {
                 for ($i = 0; $i < 8; $i++) {
                     Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                    $this->forgetSlotCrossLock($i);
                 }
             } catch (\Throwable $e) {
                 Log::channel('sync')->warning('Could not clear slot locks on portal recovery: ' . $e->getMessage());

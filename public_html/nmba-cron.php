@@ -110,10 +110,12 @@ if (($_GET['run_worker'] ?? '') === 'true') {
         $kernel->bootstrap();
 
         // Extend PHP execution time for this worker request.
+        // Hostinger LiteSpeed default is ~90s; set_time_limit overrides it for the current process.
         @set_time_limit(300);
 
         // THROUGHPUT FIX: max-time raised 50→80s — portal takes 30-50s per event;
         // 50s only allowed 1 event per worker. 80s allows 2+ events per worker.
+        // timeout raised 60→85s to cover a full portal response + overhead.
         $output = new \Symfony\Component\Console\Output\BufferedOutput();
         $input  = new \Symfony\Component\Console\Input\StringInput('queue:work database --max-time=80 --tries=10 --timeout=85 --stop-when-empty');
         $exitCode   = $kernel->handle($input, $output);
@@ -133,7 +135,10 @@ if (($_GET['run_worker'] ?? '') === 'true') {
         // If so, spawn another async worker loopback!
         $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
             ->where('queue', 'default')
-            ->whereNull('reserved_at')
+            ->where(function ($query) {
+                $query->whereNull('reserved_at')
+                      ->orWhere('reserved_at', '<=', time() - 900);
+            })
             ->where('available_at', '<=', time())
             ->count();
 
@@ -156,7 +161,10 @@ if (($_GET['run_worker'] ?? '') === 'true') {
 
                     $remainingJobs = \Illuminate\Support\Facades\DB::table('jobs')
                         ->where('queue', 'default')
-                        ->whereNull('reserved_at')
+                        ->where(function ($query) {
+                            $query->whereNull('reserved_at')
+                                  ->orWhere('reserved_at', '<=', time() - 900);
+                        })
                         ->where('available_at', '<=', time())
                         ->count();
 
@@ -212,6 +220,61 @@ register_shutdown_function(function () use ($lockFile, &$lockReleased) {
         @unlink($lockFile);
     }
 });
+
+// ── Helper: write a telemetry point from the cron (browser-independent) ────────
+//
+// Uses a 60s file-based lock stored in SHARED_DIR so only one telemetry record
+// is written per cron cycle, independent of the browser's 15s telemetry_log_lock.
+// Called AFTER Laravel has been bootstrapped (vendor/autoload loaded).
+function cronWriteTelemetry(bool $isOnline, int $pendingJobs, float $responseTime): void
+{
+    $lockFile = SHARED_DIR . '/cron_telemetry_write.lock';
+
+    // Honour a 60s lock to prevent duplicate writes when peer-trigger fires within same minute.
+    if (file_exists($lockFile) && (time() - filemtime($lockFile)) < 55) {
+        return;
+    }
+    touch($lockFile);
+
+    try {
+        $load      = function_exists('sys_getloadavg') ? (sys_getloadavg()[0] ?? 0) : 0;
+        $mem       = memory_get_usage(true) / 1024 / 1024;
+        $diskFree  = @disk_free_space('/') ?: 0;
+        $diskTotal = @disk_total_space('/') ?: 1;
+        $diskUsage = 100 - (($diskFree / $diskTotal) * 100);
+
+        \App\Models\SystemTelemetry::create([
+            'cpu_load'      => $load,
+            'memory_usage'  => $mem,
+            'disk_usage'    => $diskUsage,
+            'pending_jobs'  => $pendingJobs,
+            'response_time' => $responseTime,
+            'is_online'     => $isOnline,
+        ]);
+
+        // Prune records older than 24 hours to keep the table lean.
+        \App\Models\SystemTelemetry::where('created_at', '<', now()->subHours(24))->delete();
+
+        // AUTO-PURGE: If real offline records exist, the seed data is polluting the
+        // uptime timeline. Purge all seed rows immediately so red bars can show.
+        $seedCutoff = \Illuminate\Support\Facades\Cache::get('system_telemetry_seed_cutoff');
+        if ($seedCutoff) {
+            $cutoffCarbon   = \Carbon\Carbon::createFromTimestamp($seedCutoff);
+            $offlineCount   = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)
+                ->where('is_online', false)
+                ->count();
+            $realCount      = \App\Models\SystemTelemetry::where('created_at', '>', $cutoffCarbon)->count();
+            // Purge seed if: 5+ offline real records, OR 20+ real records
+            if ($offlineCount >= 5 || $realCount >= 20) {
+                \App\Models\SystemTelemetry::where('created_at', '<=', $cutoffCarbon)->delete();
+                \Illuminate\Support\Facades\Cache::forget('system_telemetry_seed_cutoff');
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Cron: Stale seed telemetry purged (offline={$offlineCount}, real={$realCount})." . PHP_EOL, FILE_APPEND);
+            }
+        }
+    } catch (\Throwable $e) {
+        file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Failed to write telemetry: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
+    }
+}
 
 // ── Helper: write cross-site portal live window ───────────────────────────────
 function writePortalLiveWindow(): void
@@ -349,8 +412,9 @@ if ($liveWindowAge !== null && $liveWindowAge < 15) {
 }
 
 if (!$portalIsAlive) {
-    // Portal is dead — immediately forget the live window and the local alive state
-    // so that the dashboard updates to Offline status instantly without cached delay.
+    // ── BUG-2 FIX: Portal is dead — delete shared file AND force-expire the
+    // Laravel cache key immediately so the dashboard flips to Offline within
+    // seconds instead of waiting up to 360s for the TTL to expire naturally.
     forgetPortalLiveWindow();
     forgetSharedValue('sre_portal_is_alive');
 
@@ -365,13 +429,19 @@ if (!$portalIsAlive) {
                 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
                 $kernel->bootstrap();
 
+                // BUG-2 FIX: Force-expire sre_portal_is_alive from the Laravel
+                // cache so checkPortalHealth() immediately sees false instead of
+                // reading the stale cached true value for up to 360 more seconds.
+                \Illuminate\Support\Facades\Cache::forget('sre_portal_is_alive');
+                \Illuminate\Support\Facades\Cache::put('sre_circuit_breaker_portal_down', true, 7200);
+
                 // Clear the default queue
                 \Illuminate\Support\Facades\DB::table('jobs')->where('queue', 'default')->delete();
 
                 // Reset all events currently marked 'syncing' back to 'pending'
                 \App\Models\Event::where('sync_status', 'syncing')
                     ->update([
-                        'sync_status' => 'pending',
+                        'sync_status'     => 'pending',
                         'last_attempt_at' => now(),
                     ]);
 
@@ -388,7 +458,30 @@ if (!$portalIsAlive) {
                     \Illuminate\Support\Facades\Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
                 }
 
+                // ── BUG-1 FIX: Clear stale transmission_lock_slot_*.lock files ──
+                // These 0-byte files are written when a slot starts transmitting and
+                // deleted when it finishes. If the portal drops mid-transmission the
+                // shutdown handler may never run, leaving stale lock files from
+                // previous days that prevent slot re-entry after recovery.
+                // Clear any lock file older than 15 minutes on every offline transition.
+                $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+                $staleCount = 0;
+                foreach ($lockFiles as $slotLock) {
+                    if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
+                        @unlink($slotLock);
+                        $staleCount++;
+                    }
+                }
+                if ($staleCount > 0) {
+                    file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Cron: Cleared {$staleCount} stale transmission lock file(s) on offline transition." . PHP_EOL, FILE_APPEND);
+                }
+
                 \Illuminate\Support\Facades\Cache::put('sre_site_was_offline', true, 7200);
+
+                // ── TELEMETRY: Record offline point on first offline transition ──
+                // pendingJobs unknown here (pre-sweep), use 0 as placeholder.
+                // Response time 60.0s indicates a portal timeout.
+                cronWriteTelemetry(false, 0, 60.0);
 
                 file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Queue sweep and dispatch locks cleared successfully.' . PHP_EOL, FILE_APPEND);
             }
@@ -396,7 +489,32 @@ if (!$portalIsAlive) {
             file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Failed to sweep queue on offline transition: ' . $e->getMessage() . PHP_EOL, FILE_APPEND);
         }
         setSharedValue('sre_last_portal_was_offline', true, 7200);
-    }
+    } else {
+        // Portal already known offline — write ongoing offline telemetry every minute.
+        // Bootstrap Laravel so we can write to the DB (only if not already done above).
+        if (!class_exists('App\\Models\\SystemTelemetry')) {
+            try {
+                if (file_exists(APP_ROOT . '/vendor/autoload.php') && file_exists(APP_ROOT . '/bootstrap/app.php')) {
+                    require APP_ROOT . '/vendor/autoload.php';
+                    $offlineApp    = require_once APP_ROOT . '/bootstrap/app.php';
+                    $offlineKernel = $offlineApp->make(Illuminate\Contracts\Console\Kernel::class);
+                    $offlineKernel->bootstrap();
+                    cronWriteTelemetry(false, 0, 60.0);
+                }
+            } catch (\Throwable $telErr) {
+                file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Could not write offline telemetry (already-offline): ' . $telErr->getMessage() . PHP_EOL, FILE_APPEND);
+            }
+        } else {
+            cronWriteTelemetry(false, 0, 60.0);
+        }
+        // Still clear stale transmission lock files (file-only sweep, no Laravel needed).
+        $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+        foreach ($lockFiles as $slotLock) {
+            if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
+                @unlink($slotLock);
+            }
+        }
+    } // end already-offline else
 
     $lockReleased = true;
     @unlink($lockFile);
@@ -442,6 +560,19 @@ try {
     // Re-write portal live window so checkPortalHealth() fallback stays fresh.
     writePortalLiveWindow();
 
+    // BUG-1 EXTENSION: Also sweep stale transmission locks on the ONLINE path.
+    // Locks from a previous day's outage survive if the portal recovers before
+    // the next offline probe fires. A once-per-run sweep here costs microseconds
+    // and ensures slots are never permanently blocked by orphaned lock files.
+    $lockFiles = glob(SHARED_DIR . '/transmission_lock_slot_*.lock') ?: [];
+    foreach ($lockFiles as $slotLock) {
+        if (file_exists($slotLock) && (time() - filemtime($slotLock)) > 300) {
+            @unlink($slotLock);
+            file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . '] Cron: Cleared stale transmission lock (online sweep): ' . basename($slotLock) . PHP_EOL, FILE_APPEND);
+        }
+    }
+
+
     // Run schedule:run (dispatches SyncBatchJobs for all pending events)
     $scheduleOutput = new \Symfony\Component\Console\Output\BufferedOutput();
     $scheduleInput  = new \Symfony\Component\Console\Input\StringInput('schedule:run');
@@ -455,7 +586,10 @@ try {
     // Now, instead of running a worker synchronously, spawn parallel async workers!
     $pendingJobs = \Illuminate\Support\Facades\DB::table('jobs')
         ->where('queue', 'default')
-        ->whereNull('reserved_at')
+        ->where(function ($query) {
+            $query->whereNull('reserved_at')
+                  ->orWhere('reserved_at', '<=', time() - 900);
+        })
         ->where('available_at', '<=', time())
         ->count();
 
@@ -463,6 +597,10 @@ try {
     $workersToSpawn = min($maxSlots, $pendingJobs);
 
     file_put_contents(LOG_FILE, '[' . date('Y-m-d H:i:s') . "] Scheduler finished. Pending jobs: {$pendingJobs}. Max slots: {$maxSlots}. Spawning {$workersToSpawn} parallel workers." . PHP_EOL, FILE_APPEND);
+
+    // ── TELEMETRY: Record online point every cron minute ─────────────────────
+    // Response time 0.12s indicates a normal fast probe response.
+    cronWriteTelemetry(true, $pendingJobs, 0.12);
 
     if ($workersToSpawn > 0 && !str_contains($_SERVER['HTTP_HOST'] ?? '', 'localhost') && !str_contains($_SERVER['HTTP_HOST'] ?? '', '127.0.0.1')) {
         $host     = $_SERVER['HTTP_HOST'] ?? 'nmbabudgam.in';

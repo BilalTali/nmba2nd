@@ -91,6 +91,7 @@ class Kernel extends ConsoleKernel
                         // Clear WithoutOverlapping slot locks to allow fresh start
                         for ($i = 0; $i < 8; $i++) {
                             Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                            $this->forgetSlotCrossLock($i);
                         }
                     } catch (\Throwable $e) {
                         Log::channel('sync')->warning('Scheduler: offline sweep failed: ' . $e->getMessage());
@@ -106,7 +107,10 @@ class Kernel extends ConsoleKernel
             try {
                 $readyJobs = \Illuminate\Support\Facades\DB::table('jobs')
                     ->where('queue', 'default')
-                    ->whereNull('reserved_at')
+                    ->where(function ($query) {
+                        $query->whereNull('reserved_at')
+                              ->orWhere('reserved_at', '<=', now()->getTimestamp() - 900);
+                    })
                     ->where('available_at', '<=', now()->getTimestamp())
                     ->count();
                 if ($readyJobs > 100) {
@@ -153,6 +157,7 @@ class Kernel extends ConsoleKernel
                 try {
                     for ($i = 0; $i < 8; $i++) {
                         Cache::forget("laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$i}");
+                        $this->forgetSlotCrossLock($i);
                     }
                 } catch (\Throwable $e) {
                     Log::channel('sync')->warning('Scheduler recovery: could not clear slot locks: ' . $e->getMessage());
@@ -202,48 +207,6 @@ class Kernel extends ConsoleKernel
      */
     public function dispatchPendingBatches(): int
     {
-        // BN-6 FIX: Select only the columns required for dispatch-eligibility
-        // checks. Avoids loading 30+ columns × 1,000 rows = unnecessary memory.
-        $events = Event::select(['id', 'sync_status', 'sync_attempts', 'last_attempt_at', 'updated_at', 'created_at'])
-            ->where(function ($q) {
-                $q->where(function ($query) {
-                    $query->where('sync_status', 'pending')
-                          ->where(function ($inner) {
-                              // THROUGHPUT FIX: reduced 5min → 2min.
-                              // Dispatch lock (6min) + transient lock (90s) already prevent
-                              // double-processing; 5min was unnecessarily starving events.
-                              $inner->whereNull('last_attempt_at')
-                                    ->orWhere('last_attempt_at', '<', now()->subMinutes(2));
-                          });
-                })
-                ->orWhere(function ($query) {
-                    $query->where('sync_status', 'syncing')
-                          ->where('updated_at', '<', now()->subMinutes(10));
-                });
-            })
-            ->whereBetween('sync_attempts', [0, 9])
-            ->orderBy('created_at', 'asc')
-            ->limit(1000)
-            ->get();
-
-        if ($events->isEmpty()) {
-            return 0;
-        }
-
-        // Filter out events still under a dispatch lock (backoff cooldown)
-        $dispatchable = $events->filter(function ($event) {
-            return !Cache::has("sre_sync_dispatch_lock_{$event->id}");
-        });
-
-        if ($dispatchable->isEmpty()) {
-            Log::channel('sync')->info('Scheduler sweep: all candidates are under dispatch locks. Skipping.');
-            return 0;
-        }
-
-        Log::channel('sync')->info('Scheduler sweep started — dispatching parallel batch jobs.', [
-            'candidate_count' => $dispatchable->count(),
-        ]);
-
         try {
             $maxSlots = app(PortalHealthService::class)->getRecommendedSlotLimit();
         } catch (\Throwable $e) {
@@ -252,6 +215,67 @@ class Kernel extends ConsoleKernel
         if (!$maxSlots) {
             $maxSlots = (int) config('services.sync.max_slots', 8);
         }
+
+        $neededCount = $maxSlots * 20; // Maximum events we could possibly dispatch (up to 20 per slot)
+        $dispatchable = collect();
+        $chunkSize = 500;
+        $offset = 0;
+        $maxSearch = 5000;
+
+        while ($dispatchable->count() < $neededCount && $offset < $maxSearch) {
+            // BN-6 FIX: Select only the columns required for dispatch-eligibility
+            // checks. Avoids loading 30+ columns × 1,000 rows = unnecessary memory.
+            $candidates = Event::select(['id', 'sync_status', 'sync_attempts', 'last_attempt_at', 'updated_at', 'created_at'])
+                ->where(function ($q) {
+                    $q->where(function ($query) {
+                        $query->where('sync_status', 'pending')
+                              ->where(function ($inner) {
+                                  // THROUGHPUT FIX: reduced 5min → 2min.
+                                  // Dispatch lock (6min) + transient lock (90s) already prevent
+                                  // double-processing; 5min was unnecessarily starving events.
+                                  $inner->whereNull('last_attempt_at')
+                                        ->orWhere('last_attempt_at', '<', now()->subMinutes(2));
+                              });
+                    })
+                    ->orWhere(function ($query) {
+                        $query->where('sync_status', 'syncing')
+                              ->where('updated_at', '<', now()->subMinutes(10));
+                    });
+                })
+                ->whereBetween('sync_attempts', [0, 9])
+                ->orderBy('created_at', 'asc')
+                ->offset($offset)
+                ->limit($chunkSize)
+                ->get();
+
+            if ($candidates->isEmpty()) {
+                break;
+            }
+
+            foreach ($candidates as $event) {
+                if (!Cache::has("sre_sync_dispatch_lock_{$event->id}")) {
+                    $dispatchable->push($event);
+                    if ($dispatchable->count() >= $neededCount) {
+                        break;
+                    }
+                }
+            }
+
+            if ($candidates->count() < $chunkSize) {
+                break;
+            }
+
+            $offset += $chunkSize;
+        }
+
+        if ($dispatchable->isEmpty()) {
+            return 0;
+        }
+
+        Log::channel('sync')->info('Scheduler sweep started — dispatching parallel batch jobs.', [
+            'candidate_count' => $dispatchable->count(),
+        ]);
+
         $isCtet = str_contains(config('app.url', ''), 'ctetmonktest');
         $slotOrder = [];
         if ($isCtet) {

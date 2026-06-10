@@ -88,6 +88,11 @@ remote_artisan "queue:flush  2>&1 || true"
 remote_artisan "queue:restart 2>&1"
 ok "Failed jobs flushed. Queue workers will restart on next cron tick."
 
+# STEP 8b — Clear stale cross-site transmission lock files
+log "Step 8b/10 — Clearing stale cross-site transmission lock files..."
+remote "rm -f /home/u335000182/shared_sync/transmission_lock_slot_*.lock || true"
+ok "Cross-site slot locks cleared."
+
 # STEP 9 — Setup cron-based scheduler & queue worker (idempotent — safe to run multiple times)
 log "Step 9/10 — Registering cron-based scheduler & queue worker..."
 CRON_CMD="*/5 * * * * $PHP $APP_DIR/artisan queue:work database --max-jobs=10 --tries=10 --timeout=110 >> $APP_DIR/storage/logs/cron-worker.log 2>&1"
