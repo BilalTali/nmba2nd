@@ -252,7 +252,19 @@ class Kernel extends ConsoleKernel
         if (!$maxSlots) {
             $maxSlots = (int) config('services.sync.max_slots', 8);
         }
-        $slotIndex = 0;
+        $isCtet = str_contains(config('app.url', ''), 'ctetmonktest');
+        $slotOrder = [];
+        if ($isCtet) {
+            for ($i = $maxSlots - 1; $i >= 0; $i--) {
+                $slotOrder[] = $i;
+            }
+        } else {
+            for ($i = 0; $i < $maxSlots; $i++) {
+                $slotOrder[] = $i;
+            }
+        }
+
+        $batchIndex = 0;
         $dispatched = 0;
 
         // THROUGHPUT FIX: chunk(20) — SyncBatchJob processes up to 20 events per slot.
@@ -260,27 +272,39 @@ class Kernel extends ConsoleKernel
         // SyncBatchJob has a 35s wall-clock guard that stops processing if it runs long;
         // jitter was also reduced so a 20-event batch completes in ~60-70s comfortably.
         foreach ($dispatchable->chunk(20) as $batch) {
-            if ($slotIndex >= $maxSlots) {
+            if ($batchIndex >= $maxSlots) {
+                break;
+            }
+
+            $assignedSlot = null;
+            while ($batchIndex < $maxSlots) {
+                $slotToCheck = $slotOrder[$batchIndex];
+
+                // Skip if this slot already has a live batch (WithoutOverlapping lock or cross-site slot lock)
+                $slotLockKey = "laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$slotToCheck}";
+                $isLocalLocked = Cache::has($slotLockKey);
+                $isCrossLocked = $this->isSlotCrossLocked($slotToCheck);
+
+                if (!$isLocalLocked && !$isCrossLocked) {
+                    $assignedSlot = $slotToCheck;
+                    $batchIndex++;
+                    break;
+                }
+
+                $reason = $isLocalLocked ? 'busy locally' : 'busy cross-site';
+                Log::channel('sync')->info("Scheduler: slot {$slotToCheck} is {$reason} — skipping.", [
+                    'slot' => $slotToCheck,
+                ]);
+                $batchIndex++;
+            }
+
+            if ($assignedSlot === null) {
                 break;
             }
 
             $batchIds = $batch->pluck('id')->toArray();
 
-            // Skip if this slot already has a live batch (WithoutOverlapping lock or cross-site slot lock)
-            $slotLockKey = "laravel-queue-overlap:App\\Jobs\\SyncBatchJob:sync_batch_slot_{$slotIndex}";
-            $isLocalLocked = Cache::has($slotLockKey);
-            $isCrossLocked = $this->isSlotCrossLocked($slotIndex);
-
-            if ($isLocalLocked || $isCrossLocked) {
-                $reason = $isLocalLocked ? 'busy locally' : 'busy cross-site';
-                Log::channel('sync')->info("Scheduler: slot {$slotIndex} is {$reason} — skipping.", [
-                    'slot' => $slotIndex,
-                ]);
-                $slotIndex++;
-                continue;
-            }
-
-            dispatch(new SyncBatchJob($batchIds, $slotIndex));
+            dispatch(new SyncBatchJob($batchIds, $assignedSlot));
 
             // Dispatch lock: 6 min, prevents duplicate-selection of same events.
             // Previously 10 min — reduced so events don't stay locked if a worker dies early.
@@ -289,11 +313,10 @@ class Kernel extends ConsoleKernel
             }
 
             Log::channel('sync')->info("Scheduler dispatched SyncBatchJob.", [
-                'slot'        => $slotIndex,
+                'slot'        => $assignedSlot,
                 'event_count' => count($batchIds),
             ]);
 
-            $slotIndex++;
             $dispatched++;
         }
 
