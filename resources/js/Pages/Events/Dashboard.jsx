@@ -1426,6 +1426,23 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                                     </tr>
                                                 ))}
                                             </tbody>
+                                            <tfoot>
+                                                <tr className="bg-slate-100/50 border-t border-slate-200 text-xs font-bold text-slate-800">
+                                                    <td className="py-3 px-4 font-black">Total</td>
+                                                    <td className="py-3 px-4 text-right font-mono text-emerald-700 font-black">
+                                                        {reportData.report.reduce((sum, r) => sum + r.local, 0).toLocaleString()}
+                                                    </td>
+                                                    <td className="py-3 px-4 text-right font-mono text-teal-700 font-black">
+                                                        {reportData.peer_name 
+                                                            ? reportData.report.reduce((sum, r) => sum + r.peer, 0).toLocaleString() 
+                                                            : '-'
+                                                        }
+                                                    </td>
+                                                    <td className="py-3 px-4 text-right font-mono text-slate-900 font-black bg-slate-100/80">
+                                                        {reportData.report.reduce((sum, r) => sum + r.total, 0).toLocaleString()}
+                                                    </td>
+                                                </tr>
+                                            </tfoot>
                                         </table>
                                     </div>
                                 </div>
