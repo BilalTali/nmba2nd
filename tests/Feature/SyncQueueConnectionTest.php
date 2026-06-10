@@ -553,6 +553,11 @@ class SyncQueueConnectionTest extends TestCase
         ]));
 
         // Trip local circuit breaker (breaker active)
+        file_put_contents($tempDir . '/sre_circuit_breaker_portal_down.json', json_encode([
+            'value' => true,
+            'expires_at' => time() + 60,
+        ]));
+        @unlink($tempDir . '/sre_portal_is_alive.json');
         \Illuminate\Support\Facades\Cache::put('sre_circuit_breaker_portal_down', true, 60);
         \Illuminate\Support\Facades\Cache::forget('sre_portal_is_alive');
 
@@ -568,6 +573,8 @@ class SyncQueueConnectionTest extends TestCase
 
         // Clean up temp directory
         @unlink($tempDir . '/portal_live_window.json');
+        @unlink($tempDir . '/sre_circuit_breaker_portal_down.json');
+        @unlink($tempDir . '/sre_portal_is_alive.json');
         @rmdir($tempDir);
     }
 

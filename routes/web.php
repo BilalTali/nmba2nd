@@ -312,6 +312,8 @@ Route::middleware(['auth', 'admin'])->group(function () {
         ->name('admin.logs.sync');
     Route::get('/admin/logs/audit', [\App\Http\Controllers\DashboardController::class, 'viewAuditLogs'])
         ->name('admin.logs.audit');
+    Route::get('/admin/sync-report', [\App\Http\Controllers\DashboardController::class, 'getSyncReport'])
+        ->name('admin.sync-report');
 });
 
 // Profile routes moved to admin group

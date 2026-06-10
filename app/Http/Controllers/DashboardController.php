@@ -481,4 +481,105 @@ class DashboardController extends Controller
         // and drops only as real offline events occur.
         return [true, 0, 0.12 + rand(0, 80) / 1000.0];
     }
+
+    /**
+     * Get date-wise sync report for last N hours from both portals.
+     */
+    public function getSyncReport(\Illuminate\Http\Request $request): JsonResponse
+    {
+        $hours = (int) $request->input('hours', 12);
+        if ($hours <= 0) {
+            return response()->json(['error' => 'Hours must be a positive integer.'], 400);
+        }
+
+        $localDb = config('database.connections.mysql.database');
+        $host = config('database.connections.mysql.host', '127.0.0.1');
+        $port = config('database.connections.mysql.port', '3306');
+        $password = config('database.connections.mysql.password');
+
+        $peerDb = null;
+        if ($localDb === 'u335000182_nmbabudgam') {
+            $peerDb = 'u335000182_database';
+        } elseif ($localDb === 'u335000182_database') {
+            $peerDb = 'u335000182_nmbabudgam';
+        }
+
+        $localName = ($localDb === 'u335000182_nmbabudgam') ? 'nmbabudgam.in' : 'ctetmonktest.fun';
+        $peerName = ($peerDb === 'u335000182_database') ? 'ctetmonktest.fun' : 'nmbabudgam.in';
+
+        // 1. Fetch Local Portal Data
+        try {
+            $localResults = DB::select("
+                SELECT event_date, COUNT(*) AS total
+                FROM events
+                WHERE sync_status = 'synced' AND synced_at >= NOW() - INTERVAL :hours HOUR
+                GROUP BY event_date
+                ORDER BY event_date
+            ", ['hours' => $hours]);
+        } catch (\Exception $e) {
+            return response()->json(['error' => "Failed to query local database: " . $e->getMessage()], 500);
+        }
+
+        // 2. Fetch Peer Portal Data
+        $peerResults = [];
+        $peerConnected = false;
+
+        if ($peerDb) {
+            try {
+                $peerPdo = new \PDO("mysql:host={$host};port={$port};dbname={$peerDb};charset=utf8mb4", $peerDb, $password, [
+                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                    \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+                ]);
+
+                $stmt = $peerPdo->prepare("
+                    SELECT event_date, COUNT(*) AS total
+                    FROM events
+                    WHERE sync_status = 'synced' AND synced_at >= NOW() - INTERVAL :hours HOUR
+                    GROUP BY event_date
+                    ORDER BY event_date
+                ");
+                $stmt->execute(['hours' => $hours]);
+                $peerResults = $stmt->fetchAll();
+                $peerConnected = true;
+            } catch (\Exception $e) {
+                // Ignore peer DB connection errors gracefully
+            }
+        }
+
+        // 3. Consolidate Results by event_date
+        $report = [];
+        foreach ($localResults as $row) {
+            $date = $row->event_date;
+            $report[$date] = [
+                'date' => $date,
+                'local' => (int) $row->total,
+                'peer' => 0,
+                'total' => (int) $row->total,
+            ];
+        }
+
+        foreach ($peerResults as $row) {
+            $date = $row['event_date'];
+            if (!isset($report[$date])) {
+                $report[$date] = [
+                    'date' => $date,
+                    'local' => 0,
+                    'peer' => (int) $row['total'],
+                    'total' => (int) $row['total'],
+                ];
+            } else {
+                $report[$date]['peer'] = (int) $row['total'];
+                $report[$date]['total'] += (int) $row['total'];
+            }
+        }
+
+        ksort($report);
+
+        return response()->json([
+            'hours' => $hours,
+            'local_name' => $localName,
+            'peer_name' => $peerConnected ? $peerName : null,
+            'report' => array_values($report),
+        ]);
+    }
 }

@@ -30,6 +30,35 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
     const [uptimeRange, setUptimeRange] = useState('24h'); // '6h', '12h', '24h'
     const [hoveredBucket, setHoveredBucket] = useState(null);
 
+    // Sync report states
+    const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+    const [reportHours, setReportHours] = useState(12);
+    const [reportData, setReportData] = useState(null);
+    const [isReportLoading, setIsReportLoading] = useState(false);
+    const [reportError, setReportError] = useState('');
+
+    const fetchSyncReport = async (hoursToFetch = reportHours) => {
+        setIsReportLoading(true);
+        setReportError('');
+        try {
+            const response = await fetch(route('admin.sync-report') + `?hours=${hoursToFetch}`);
+            if (!response.ok) throw new Error('Failed to load sync report.');
+            const data = await response.json();
+            setReportData(data);
+        } catch (err) {
+            console.error('Error fetching sync report:', err);
+            setReportError(err.message || 'Error fetching report.');
+        } finally {
+            setIsReportLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (isReportModalOpen) {
+            fetchSyncReport(reportHours);
+        }
+    }, [isReportModalOpen, reportHours]);
+
     // SRE Uptime calculation
     const { overallUptime, buckets } = React.useMemo(() => {
         if (!telemetry || telemetry.length === 0) {
@@ -490,7 +519,7 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                     </svg>
                                     System Diagnostics & Traffic Checks
                                 </h3>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
                                     <a
                                         href="https://nashamuktjk.org/enterprise/login"
                                         target="_blank"
@@ -573,6 +602,21 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                                             <p className="text-xs text-slate-500" style={{ fontFamily: "'Inter', sans-serif" }}>Live performance grids</p>
                                         </div>
                                     </a>
+
+                                    <button
+                                        onClick={() => setIsReportModalOpen(true)}
+                                        className="flex items-center gap-3.5 p-4 rounded-2xl bg-slate-50 border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50/20 hover:shadow-sm hover:-translate-y-0.5 transition-all duration-205 text-left group"
+                                    >
+                                        <div className="p-2.5 rounded-xl bg-teal-100 text-teal-700 group-hover:bg-teal-200 transition-colors">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                            </svg>
+                                        </div>
+                                        <div>
+                                            <h4 className="text-sm font-bold text-slate-800" style={{ fontFamily: "'Outfit', sans-serif" }}>Sync Report</h4>
+                                            <p className="text-xs text-slate-500" style={{ fontFamily: "'Inter', sans-serif" }}>Date-wise stats</p>
+                                        </div>
+                                    </button>
                                 </div>
                             </div>
                         )}
@@ -1230,6 +1274,178 @@ export default function Dashboard({ metrics, recentEvents, recentFailures, autoS
                         </div>
                     </div>
                 )}
+
+            {/* Sync Report Modal */}
+            {isReportModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md transition-opacity duration-300">
+                    <div 
+                        className="bg-white rounded-3xl shadow-2xl border border-slate-100 max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col transform transition-all scale-100 animate-in fade-in zoom-in-95 duration-200"
+                        style={{ fontFamily: "'Inter', sans-serif" }}
+                    >
+                        {/* Modal Header */}
+                        <div className="p-6 border-b border-slate-105 bg-gradient-to-r from-emerald-50/50 via-teal-50/20 to-transparent flex items-center justify-between">
+                            <div>
+                                <h3 className="text-xl font-black text-slate-800 flex items-center gap-2.5" style={{ fontFamily: "'Outfit', sans-serif" }}>
+                                    <span className="p-2 rounded-xl bg-teal-100 text-teal-700">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                    </span>
+                                    Sync Report by Event Date
+                                </h3>
+                                <p className="text-xs text-slate-505 mt-1 font-medium">Comparison of synced events between local and peer databases</p>
+                            </div>
+                            <button 
+                                onClick={() => setIsReportModalOpen(false)}
+                                className="p-2 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        {/* Controls & Filter */}
+                        <div className="p-6 bg-slate-50/60 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Sync Timeframe:</span>
+                                <div className="inline-flex rounded-xl bg-slate-100 p-0.5 border border-slate-200">
+                                    {[3, 6, 9, 12, 24, 48].map((h) => (
+                                        <button
+                                            key={h}
+                                            onClick={() => {
+                                                setReportHours(h);
+                                                fetchSyncReport(h);
+                                            }}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 ${
+                                                reportHours === h
+                                                    ? 'bg-white text-slate-800 shadow-sm'
+                                                    : 'text-slate-500 hover:text-slate-800'
+                                            }`}
+                                        >
+                                            {h}h
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={() => fetchSyncReport(reportHours)}
+                                disabled={isReportLoading}
+                                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-505 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/10 flex items-center gap-2 transition-all disabled:opacity-50"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className={`h-3.5 w-3.5 ${isReportLoading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                                {isReportLoading ? 'Refreshing...' : 'Refresh'}
+                            </button>
+                        </div>
+
+                        {/* Modal Body */}
+                        <div className="flex-1 overflow-y-auto p-6 min-h-[250px] flex flex-col">
+                            {isReportLoading && !reportData && (
+                                <div className="flex-1 flex flex-col items-center justify-center py-12 space-y-3">
+                                    <div className="w-10 h-10 border-4 border-emerald-500/20 border-t-emerald-600 rounded-full animate-spin"></div>
+                                    <p className="text-sm text-slate-500 font-medium">Compiling synchronization logs...</p>
+                                </div>
+                            )}
+
+                            {reportError && (
+                                <div className="p-4 bg-rose-50 border border-rose-100 rounded-2xl text-rose-600 text-xs flex items-start gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    </svg>
+                                    <div>
+                                        <p className="font-bold">Error loading sync report</p>
+                                        <p className="mt-0.5">{reportError}</p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {!isReportLoading && reportData && reportData.report && reportData.report.length === 0 && (
+                                <div className="flex-1 flex flex-col items-center justify-center py-12 text-center">
+                                    <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 mb-4 border border-slate-100">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0a2 2 0 01-2 2H6a2 2 0 01-2-2m16 0V9a2 2 0 00-2-2H6a2 2 0 00-2 2v4.5m16 3H4" />
+                                        </svg>
+                                    </div>
+                                    <h4 className="text-slate-750 font-bold mb-1" style={{ fontFamily: "'Outfit', sans-serif" }}>No Synced Events</h4>
+                                    <p className="text-xs text-slate-500 max-w-sm">No events were synchronized on either portal in the last {reportHours} hours.</p>
+                                </div>
+                            )}
+
+                            {reportData && reportData.report && reportData.report.length > 0 && (
+                                <div className="flex-1 space-y-6">
+                                    {/* Summary Cards */}
+                                    <div className="grid grid-cols-3 gap-4">
+                                        <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                                            <p className="text-[10px] font-bold text-slate-505 uppercase tracking-wider mb-1">Timeframe</p>
+                                            <p className="text-lg font-black text-slate-800" style={{ fontFamily: "'Outfit', sans-serif" }}>Last {reportData.hours} Hrs</p>
+                                        </div>
+                                        <div className="p-4 rounded-2xl bg-emerald-50/30 border border-emerald-100">
+                                            <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1">Local ({reportData.local_name})</p>
+                                            <p className="text-lg font-black text-emerald-700" style={{ fontFamily: "'Outfit', sans-serif" }}>
+                                                {reportData.report.reduce((sum, r) => sum + r.local, 0).toLocaleString()} <span className="text-xs text-slate-400 font-normal">events</span>
+                                            </p>
+                                        </div>
+                                        <div className="p-4 rounded-2xl bg-teal-50/30 border border-teal-100">
+                                            <p className="text-[10px] font-bold text-teal-600 uppercase tracking-wider mb-1">
+                                                Peer {reportData.peer_name ? `(${reportData.peer_name})` : '(Disconnected)'}
+                                            </p>
+                                            <p className="text-lg font-black text-teal-700" style={{ fontFamily: "'Outfit', sans-serif" }}>
+                                                {reportData.peer_name 
+                                                    ? `${reportData.report.reduce((sum, r) => sum + r.peer, 0).toLocaleString()} events` 
+                                                    : 'N/A'
+                                                }
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Report Table */}
+                                    <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm max-h-[300px] overflow-y-auto">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead>
+                                                <tr className="bg-slate-55 border-b border-slate-200 text-[10px] font-bold text-slate-505 uppercase tracking-wider sticky top-0">
+                                                    <th className="py-3.5 px-4 bg-slate-50">Event Date</th>
+                                                    <th className="py-3.5 px-4 text-right bg-slate-50">{reportData.local_name} (Local)</th>
+                                                    <th className="py-3.5 px-4 text-right bg-slate-50">
+                                                        {reportData.peer_name ? reportData.peer_name : 'Peer DB'}
+                                                    </th>
+                                                    <th className="py-3.5 px-4 text-right bg-slate-100">Total Synced</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100 text-xs">
+                                                {reportData.report.map((row) => (
+                                                    <tr key={row.date} className="hover:bg-slate-50/50 transition-colors">
+                                                        <td className="py-3 px-4 font-semibold text-slate-700">{row.date}</td>
+                                                        <td className="py-3 px-4 text-right font-mono text-emerald-600 font-bold">{row.local.toLocaleString()}</td>
+                                                        <td className="py-3 px-4 text-right font-mono text-teal-600 font-bold">
+                                                            {reportData.peer_name ? row.peer.toLocaleString() : '-'}
+                                                        </td>
+                                                        <td className="py-3 px-4 text-right font-mono text-slate-800 font-black bg-slate-50/20">{row.total.toLocaleString()}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Modal Footer */}
+                        <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex justify-end">
+                            <button
+                                onClick={() => setIsReportModalOpen(false)}
+                                className="px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm"
+                                style={{ fontFamily: "'Outfit', sans-serif" }}
+                            >
+                                Close Report
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             </div>
         </AuthenticatedLayout>
     );
