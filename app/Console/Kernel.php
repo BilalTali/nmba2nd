@@ -193,6 +193,28 @@ class Kernel extends ConsoleKernel
             ->weekly()
             ->name('nmba_portal_credential_check')
             ->appendOutputTo(storage_path('logs/credential-checks-scheduler.log'));
+
+        // Purge large log files every 12 hours (at 00:00 and 12:00) to prevent disk exhaustion
+        $schedule->call(function () {
+            $logFiles = [
+                storage_path('logs/sync-health.log'),
+                storage_path('logs/sync-health-scheduler.log'),
+                storage_path('logs/cron-worker.log'),
+                storage_path('logs/laravel.log'),
+                storage_path('logs/sync-ctet.log'),
+                storage_path('logs/credential-checks-scheduler.log'),
+            ];
+
+            foreach ($logFiles as $filePath) {
+                if (file_exists($filePath)) {
+                    $handle = fopen($filePath, 'r+');
+                    if ($handle !== false) {
+                        ftruncate($handle, 0);
+                        fclose($handle);
+                    }
+                }
+            }
+        })->twiceDaily(0, 12)->name('nmba_clear_logs');
     }
 
     /**
