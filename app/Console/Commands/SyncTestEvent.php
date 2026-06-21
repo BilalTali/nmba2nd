@@ -55,20 +55,27 @@ class SyncTestEvent extends Command
             $this->warn("⚠ No photos associated with this event.");
         } else {
             $allPhotosOk = true;
+            $disk = Storage::disk(config('filesystems.events_disk', 'public'));
             foreach ($photos as $index => $path) {
-                $fullPath = Storage::disk('public')->path($path);
-                if (file_exists($fullPath)) {
-                    $this->info("  [Photo #{$index}] Found: " . basename($path) . " (" . number_format(filesize($fullPath) / 1024, 1) . " KB)");
-                } else {
+                $exists = $disk->exists($path);
+                if (!$exists) {
                     // Try fallback
                     $fallbackPath = str_replace('events/', 'events/synced/', $path);
-                    $fallbackFullPath = Storage::disk('public')->path($fallbackPath);
-                    if (file_exists($fallbackFullPath)) {
-                        $this->info("  [Photo #{$index}] Found in fallback: " . basename($fallbackPath));
-                    } else {
-                        $this->error("  [Photo #{$index}] Missing file at path: {$fullPath}");
-                        $allPhotosOk = false;
+                    if ($disk->exists($fallbackPath)) {
+                        $path = $fallbackPath;
+                        $exists = true;
                     }
+                }
+
+                if ($exists) {
+                    $sizeBytes = 0;
+                    try {
+                        $sizeBytes = $disk->size($path);
+                    } catch (\Exception $e) {}
+                    $this->info("  [Photo #{$index}] Found: " . basename($path) . " (" . number_format($sizeBytes / 1024, 1) . " KB)");
+                } else {
+                    $this->error("  [Photo #{$index}] Missing file in storage: {$path}");
+                    $allPhotosOk = false;
                 }
             }
             if (!$allPhotosOk) {
@@ -195,22 +202,24 @@ class SyncTestEvent extends Command
         $this->comment("\nStep 6: Executing live upload (POST event_create)...");
         $streams = [];
         try {
+            $disk = Storage::disk(config('filesystems.events_disk', 'public'));
             foreach ($photos as $path) {
-                $fullPath = Storage::disk('public')->path($path);
-                if (!file_exists($fullPath)) {
+                if (!$disk->exists($path)) {
                     $fallbackPath = str_replace('events/', 'events/synced/', $path);
-                    $fullPath = Storage::disk('public')->path($fallbackPath);
+                    if ($disk->exists($fallbackPath)) {
+                        $path = $fallbackPath;
+                    }
                 }
 
-                $handle = fopen($fullPath, 'r');
-                if ($handle === false) {
-                    throw new \Exception("Could not open handle for {$fullPath}");
+                $handle = $disk->readStream($path);
+                if ($handle === false || !is_resource($handle)) {
+                    throw new \Exception("Could not open handle/stream for: {$path}");
                 }
                 $streams[] = $handle;
                 $multipart[] = [
                     'name'     => 'event_photos[]',
                     'contents' => $handle,
-                    'filename' => basename($fullPath),
+                    'filename' => basename($path),
                 ];
             }
 
