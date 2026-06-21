@@ -65,7 +65,7 @@ return [
         'space_sftp' => [
             'driver' => 'sftp',
             'host' => env('SPACE_SFTP_HOST'),
-            'port' => env('SPACE_SFTP_PORT', 65002),
+            'port' => (int) env('SPACE_SFTP_PORT', 65002),
             'username' => env('SPACE_SFTP_USERNAME'),
             'password' => env('SPACE_SFTP_PASSWORD'),
             'root' => env('SPACE_SFTP_ROOT', '/home/u596750690/domains/ctetmonktest.space/public_html/storage/app/public'),
