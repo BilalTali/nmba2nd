@@ -155,8 +155,8 @@ class ImageOptimizationService
             $permanentFilename = uniqid('nmba_', true) . '.' . $extension;
             $permanentPath     = 'events/' . $permanentFilename;
 
-            // Persist compressed binary to the public storage disk.
-            Storage::disk('public')->put($permanentPath, file_get_contents($tempPath));
+            // Persist compressed binary to the target events storage disk.
+            Storage::disk(config('filesystems.events_disk', 'public'))->put($permanentPath, file_get_contents($tempPath));
 
             // Remove the temp file immediately after successful storage write.
             if (file_exists($tempPath)) {

@@ -649,33 +649,33 @@ class HttpPortalSyncService implements PortalSyncInterface
 
             $updatedPaths = [];
             $pathChanged = false;
+            $disk = Storage::disk(config('filesystems.events_disk', 'public'));
 
             foreach ($event->photo_paths as $path) {
-                $fullPath = Storage::disk('public')->path($path);
+                $exists = $disk->exists($path);
 
-                if (!file_exists($fullPath)) {
+                if (!$exists) {
                     // Try fallback to the 'synced' directory
                     if (!str_contains($path, 'events/synced/')) {
                         $fallbackPath = str_replace('events/', 'events/synced/', $path);
-                        $fallbackFullPath = Storage::disk('public')->path($fallbackPath);
-                        if (file_exists($fallbackFullPath)) {
+                        if ($disk->exists($fallbackPath)) {
                             $path = $fallbackPath;
-                            $fullPath = $fallbackFullPath;
                             $pathChanged = true;
+                            $exists = true;
                         }
                     }
                 }
 
-                if (!file_exists($fullPath)) {
+                if (!$exists) {
                     throw new PermanentSyncException(
                         "Required photo asset missing from storage: {$path}"
                     );
                 }
 
-                $handle = fopen($fullPath, 'r');
-                if ($handle === false) {
+                $handle = $disk->readStream($path);
+                if ($handle === false || !is_resource($handle)) {
                     throw new PermanentSyncException(
-                        "Cannot open file handle for asset: {$fullPath}"
+                        "Cannot open file stream for asset: {$path}"
                     );
                 }
 
@@ -683,7 +683,7 @@ class HttpPortalSyncService implements PortalSyncInterface
                 $multipart[] = [
                     'name'     => 'event_photos[]',
                     'contents' => $handle,
-                    'filename' => basename($fullPath),
+                    'filename' => basename($path),
                 ];
                 $updatedPaths[] = $path;
             }

@@ -15,6 +15,8 @@ return [
 
     'default' => env('FILESYSTEM_DISK', 'local'),
 
+    'events_disk' => env('EVENTS_DISK', 'public'),
+
     /*
     |--------------------------------------------------------------------------
     | Filesystem Disks
@@ -58,6 +60,16 @@ return [
             'use_path_style_endpoint' => env('AWS_USE_PATH_STYLE_ENDPOINT', false),
             'throw' => false,
             'report' => false,
+        ],
+
+        'space_sftp' => [
+            'driver' => 'sftp',
+            'host' => env('SPACE_SFTP_HOST'),
+            'port' => env('SPACE_SFTP_PORT', 65002),
+            'username' => env('SPACE_SFTP_USERNAME'),
+            'password' => env('SPACE_SFTP_PASSWORD'),
+            'root' => env('SPACE_SFTP_ROOT', '/home/u596750690/domains/ctetmonktest.space/public_html/storage/app/public'),
+            'timeout' => 30,
         ],
 
     ],
